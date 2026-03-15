@@ -415,13 +415,31 @@ def load_fact_gw_player(conn: sqlite3.Connection, data_root: Path) -> None:
             lambda tid: team_sk_map.get((sid, int(tid))) if pd.notna(tid) else None
         )
 
-        # player's own team_sk from dim_player_season (static end-of-season assignment)
+        # Derive each player's match-day team_sk from fixture context.
+        # The home team of a fixture = the opponent_team_sk seen by away players,
+        # and vice versa. This is robust to mid-season transfers and does not rely
+        # on the season-end team assignment in dim_player_season.
+        away_view = (gw[gw['was_home'] == 0]
+                     .groupby(['GW', 'fixture'])['opponent_team_sk']
+                     .first()
+                     .rename('home_team_sk'))
+        home_view = (gw[gw['was_home'] == 1]
+                     .groupby(['GW', 'fixture'])['opponent_team_sk']
+                     .first()
+                     .rename('away_team_sk'))
+        gw = gw.join(away_view, on=['GW', 'fixture'])
+        gw = gw.join(home_view, on=['GW', 'fixture'])
+        gw['team_sk'] = gw.apply(
+            lambda r: r['home_team_sk'] if r['was_home'] == 1 else r['away_team_sk'],
+            axis=1,
+        )
+
+        # Read position from dim_player_season (still needed for pre-2020-21 backfill)
         ps = pd.read_sql(
-            f"SELECT player_code, team_sk, position_code, position_label "
+            f"SELECT player_code, position_code, position_label "
             f"FROM dim_player_season WHERE season_id = {sid}",
             conn,
         ).set_index('player_code')
-        gw['team_sk'] = gw['player_code'].map(ps['team_sk'])
 
         # ── position ─────────────────────────────────────────────────────────
         if 'position' in gw.columns:
@@ -471,6 +489,21 @@ def load_fact_gw_player(conn: sqlite3.Connection, data_root: Path) -> None:
                 continue
             db_col = 'xp' if src_col == 'xP' else src_col
             data[db_col] = pd.to_numeric(gw[src_col], errors='coerce')
+
+        # mng_* columns: set to NULL for regular player rows.
+        # A manager row has exactly one game managed, so mng_win+mng_draw+mng_loss=1.
+        # Regular player rows have all zeros, which should be NULL not 0.
+        _mng_cols = ['mng_win', 'mng_draw', 'mng_loss', 'mng_goals_scored',
+                     'mng_clean_sheets', 'mng_underdog_win', 'mng_underdog_draw']
+        present_mng = [c for c in _mng_cols if c in data]
+        if present_mng:
+            zero = pd.Series(0, index=gw.index)
+            mng_sum = (data.get('mng_win', zero).fillna(0)
+                       + data.get('mng_draw', zero).fillna(0)
+                       + data.get('mng_loss', zero).fillna(0))
+            is_manager = mng_sum == 1
+            for c in present_mng:
+                data[c] = data[c].where(is_manager)
 
         out = pd.DataFrame(data)
 
