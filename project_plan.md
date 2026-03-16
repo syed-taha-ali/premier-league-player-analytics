@@ -14,8 +14,8 @@
 | 2 | Data Cleaning |  Complete |
 | 3 | EDA |  Complete |
 | 4 | Feature Engineering |  Complete |
-| 5 | Modelling |  Not started |
-| 6 | Evaluation |  Not started |
+| 5 | Modelling |  Complete |
+| 6 | Evaluation |  Complete |
 | 7 | Interactive Dashboard & Visualisations |  Not started |
 | 8 | Deployment |  Not started |
 | 9 | Monitoring |  Not started |
@@ -235,6 +235,22 @@ Feature applicability by position:
 
 ## Phase 5 — Modelling
 
+**Status: Complete.**
+
+**Deliverables:**
+- `ml/evaluate.py` — 3-fold expanding-window CV; metrics, calibration plots, SHAP plots
+- `ml/train.py` — final model training on all xG era data; serialises to `models/`
+- `ml/predict.py` — inference pipeline; per-GW ranked predictions
+- `models/` — 12 serialised model bundles (4 positions × 3 models: baseline, ridge, lgbm)
+- `logs/training/` — CV metrics CSVs, OOF predictions parquets, per-position markdown reports
+- `outputs/models/` — calibration, MAE-by-fold, and SHAP plots (12 PNGs total)
+- `docs/modelling_report.md` — full results report: CV metrics, feature analysis, Phase 7+ implications
+
+**Key result:** Ridge is the production model for all positions (CV MAE: GK 2.132 | DEF 2.138 |
+MID 1.830 | FWD 2.254). All models pass the baseline gate. See `docs/modelling_report.md`.
+
+---
+
 **Target:** `total_points` (GW-level regression, continuous output)
 **Architecture:** Four position-specific models — GK, DEF, MID, FWD. Never cross-position.
 **Validation:** Expanding-window temporal CV (train on seasons N…k, test on k+1). Never random split.
@@ -414,6 +430,9 @@ CV fold. Tune on validation fold; do not touch test fold.
 ---
 
 ## Phase 6 — Evaluation
+
+**Status: Complete** (integrated into the Phase 5 CV pipeline via `ml/evaluate.py`).
+All §6.1–6.5 requirements are implemented. See `docs/modelling_report.md` for full results.
 
 ### 6.1 Validation framework
 - **Method:** Expanding-window temporal CV — train on seasons 1…k, validate on k+1.
