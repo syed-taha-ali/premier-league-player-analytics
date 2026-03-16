@@ -12,7 +12,7 @@
 |---|-------|--------|
 | 1 | Data Collection |  Complete |
 | 2 | Data Cleaning |  Complete |
-| 3 | EDA |  Partial |
+| 3 | EDA |  Complete |
 | 4 | Feature Engineering |  Not started |
 | 5 | Modelling |  Not started |
 | 6 | Evaluation |  Not started |
@@ -54,55 +54,50 @@
 
 ---
 
-## Phase 3 — EDA 
+## Phase 3 — EDA
 
-**What exists:** `logs/data_biases.md` — 10 biases quantified with SQL-backed findings,
-including team strength confounding (r=−0.90), fixture difficulty gap (30–50% pts
-difference), survivorship skew (75% of data is 30+ GW starters), home advantage
-(+12–20% by position), and temporal drift (−26% pts/GW over 10 seasons).
+**Status: Complete.** All six analysis sections implemented and documented.
 
-**What to build — `eda/` directory:**
+**Deliverables:**
+- `eda/eda_report.ipynb` — runnable Jupyter notebook (25 code cells, 30 markdown cells)
+- `outputs/eda/` — 24 exported PNG charts
+- `docs/eda_report.md` — full written report with chart interpretations (Section 1) and
+  Phase 4 implications and recommendations (Section 2)
+- `docs/data_biases.md` — 10 biases quantified with SQL-backed findings
+
+**Key findings feeding Phase 4:**
 
 ### 3.1 Target variable analysis
-- Distribution of `total_points` per GW: histogram, box plot by position
-- Proportion of blanks (0–1 pts), low scores (2–4), hauls (12+) by position
-- Points per 90 minutes (filter `minutes > 0`): highlights true performance vs benching
-- Season-level totals: distribution of `dim_player_season.total_points` by position/price band
+- All positions share heavy right-skew: >70% of GW appearances score 0–1 pts; hauls (<2%) drive prediction variance
+- Means: GK 0.99, DEF 1.20, MID 1.33, FWD 1.40; standard deviations exceed means (GW pts highly volatile)
+- Points per 90 (minutes > 0): FWDs lead at median ~4 pts/90; GK distribution most symmetric
 
 ### 3.2 Temporal analysis
-- Average pts/GW by season (the −26% drift documented in data_biases.md)
-- Era comparison: pre-xG (2016–22) vs xG era (2022–26) — pts distribution, feature availability
-- GW-by-GW scoring patterns within seasons: early-season vs late-season effects
-- COVID season (2019-20): GW gap at 30–38, confirm data integrity
+- −26.1% pts/GW drift confirmed: peak 1.42 (2018-19) → trough 1.05 (2023-24)
+- Pre-xG era mean 1.34 vs xG era mean 1.14 — 15% gap with incompatible feature sets → Option A adopted
+- Early-season premium: GW 1–6 avg 1.375 vs GW 33–38 avg 1.154 (+16.0%)
+- COVID 2019-20: GW gap at 30–38 confirmed clean; rolling features must not chain across GW 29 → 39
 
 ### 3.3 Position analysis
-- Per-position stat profiles: goals/90, assists/90, CS rate, bonus rate, ICT breakdown
-- Cross-position points comparison — demonstrates why position-specific models are required
-- MID sub-role heterogeneity: goals/90 distribution within MID (7x range identified)
-- GK scoring drivers: CS rate vs saves rate vs team defensive quality
+- GK scoring driven almost entirely by CS rate (r = 0.795); saves show weak negative correlation (r = −0.12)
+- MID goals/90 coefficient of variation = 0.932 vs FWD 0.490 — sub-role heterogeneity is structural
+- Per-position profiles confirm fully non-overlapping feature sets across positions
 
-### 3.4 Team & fixture analysis
-- Team CS rate league table per season (14.8x range between top and bottom)
-- Home vs away points split by position (DEF +20.5%, others +10–12%)
-- Top-6 vs rest fixture effect (+21–49% pts penalty when facing top-6)
-- Correlation heatmap: `team_goals_conceded_season` vs DEF/GK pts
+### 3.4 Team and fixture analysis
+- Team CS rate range: Arsenal 0.474 vs Sheffield United 0.027 — 17.8x range (2023-24)
+- Home premium (confirmed across all 10 seasons): GK +7.5%, DEF +18.7%, MID +11.1%, FWD +11.2%
+- Top-6 fixture penalty: GK −17.6%, DEF −33.8%, MID −16.6%, FWD −21.2%
+- Team goals conceded explains 46.6% of variance in DEF/GK average GW points (r = −0.683)
 
-### 3.5 Player & price analysis
-- `start_cost` vs `total_points` scatter with regression line (r=0.69)
-- Price band performance table (£5m brackets)
-- Career length distribution: 39% appear only 1 season, 13% appear 6+ seasons
-- Minutes distribution: 28% of player-seasons have 0 minutes (never played)
-- Survivorship: compare feature distributions for regular starters vs rotational players
+### 3.5 Player and price analysis
+- start_cost vs season_total_points: overall r = 0.505; per position 0.467–0.603
+- 39.4% of players appear in only one season — cold-start problem for rolling features
+- 27.6% of player-seasons have zero minutes (DNP); 21.4% are regular starters (2000+ min)
 
-### 3.6 Correlation & feature relevance
-- Pearson/Spearman correlation matrix: all numeric features vs `total_points`
-- Lag-1 correlation: does GW N−1 performance predict GW N? (validates rolling features)
-- Missing data matrix: visual map of which columns are NULL in which seasons/eras
-
-### 3.7 Outputs
-- `eda/eda_report.ipynb` or `eda/eda_report.py` — runnable analysis
-- `outputs/eda/` — exported charts (PNG/HTML)
-- Findings feed directly into feature engineering decisions in Phase 4
+### 3.6 Correlation and feature relevance
+- Top same-GW correlates with `total_points`: `bonus` r ≈ 0.74, `bps` r ≈ 0.70, `ict_index` r ≈ 0.65 — all post-match leakage; banned as features
+- Genuinely predictive signals: `minutes` r ≈ 0.55, `expected_goal_involvements` r ≈ 0.48 (MID/FWD), `clean_sheets` r ≈ 0.55 (GK/DEF — rolling lag only)
+- Lag-1 autocorrelation: Pearson r = 0.378, Spearman rho = 0.650 over 234,686 GW pairs — validates rolling-window features
 
 ---
 
@@ -113,29 +108,45 @@ DataFrame from `db/fpl.db`.
 
 ### 4.1 Base filter
 ```sql
-WHERE mng_win IS NULL          -- exclude manager cards (2024-25)
-  AND minutes > 0              -- exclude DNP appearances
+WHERE mng_win IS NULL          -- exclude 322 manager rows (2024-25)
+  AND minutes > 0              -- exclude 27.6% DNP appearances
+  AND position_label IS NOT NULL
   AND season_gw_count >= 5     -- exclude sparse player-seasons (< 5 GW appearances)
 ```
 
-### 4.2 Era strategy decision (resolve before engineering)
-- **Option A — xG era only (recommended):** seasons 7–10 (2022-23 to 2025-26), ~96,000 rows.
-  Full feature set including xG/xA/xGI/xGC/starts. Cleanest model inputs.
-- **Option B — all 10 seasons:** add `era_id` flag (1=pre-xG, 2=xG era); xG features
-  NULL for 60% of rows. Requires imputation strategy or era-conditional models.
+### 4.2 Era strategy — Option A adopted
 
-### 4.3 Mandatory engineered features (from bias analysis)
+**Option A — xG era only (seasons 7–10, 2022-23 to 2025-26), ~96,000 rows.**
 
-| Feature | Derivation | Addresses bias |
-|---------|-----------|----------------|
-| `opponent_season_rank` | Final league position 1–20 per season, joined via `opponent_team_sk` | Fixture difficulty (CRITICAL) |
-| `team_goals_conceded_season` | `SUM(goals_conceded)` per team per season from `fact_gw_player` | Team strength confounding (CRITICAL) |
-| `era_id` | 1 = pre-xG (seasons 1–6); 2 = xG era (seasons 7–10) | Temporal drift (HIGH) — only needed for Option B |
+Adopted based on EDA findings:
+1. Pre-xG seasons lack the most predictive attacking features (`xG/xA/xGI/xGC`), which are absent for 60% of historical rows.
+2. The −26.1% scoring drift (peak 1.42 pts/GW in 2018-19 → trough 1.05 in 2023-24) means pre-2022-23 data represents a different outcome distribution requiring explicit normalisation.
+3. The xG era alone (~96,000 filtered rows) is sufficient for position-specific LightGBM and Ridge models with 3-fold expanding-window CV.
+4. Option B adds substantial engineering complexity (era flags, imputation, era-conditional feature paths) for uncertain marginal gain.
+
+If Option B is pursued in future: mandatory additions are `era_id` flag (1=pre-xG, 2=xG), season-mean-normalised `total_points` as training target, and xG features imputed as zero (not NaN) with an accompanying `has_xg` boolean indicator.
+
+### 4.3 Mandatory engineered features (EDA-confirmed)
+
+| Feature | Derivation | EDA justification |
+|---------|-----------|-------------------|
+| `opponent_season_rank` | Final league position 1–20 per season, joined via `opponent_team_sk → dim_team → (season_id, team_id)` | Top-6 penalty: DEF −33.8%, FWD −21.2%, GK −17.6%, MID −16.6%. A static top-6 flag under-captures season-specific difficulty. (CRITICAL) |
+| `team_goals_conceded_season` | `SUM(goals_conceded)` per `(team_sk, season_id)` from `fact_gw_player`, lagged to exclude current GW | 46.6% of variance in DEF/GK avg pts explained by this single variable (team-season level r = −0.683; player-level r = −0.90 per biases analysis). (CRITICAL) |
+| `was_home` | Already present in `fact_gw_player` — no derivation needed | Home premium confirmed: GK +7.5%, DEF +18.7%, MID +11.1%, FWD +11.2%, consistent across all 10 seasons and validated by COVID neutral-venue natural experiment. (MANDATORY) |
 
 ### 4.4 Leakage rules (strict)
-- **Never use** same-GW `transfers_in`, `transfers_out`, or `selected` as features
-- **Never use** `end_cost` or post-season aggregate stats
-- **Always lag** `transfers_in` / `transfers_out` by exactly 1 GW before use
+
+**Post-match computed — never use as features:**
+- `bonus`, `bps`, `ict_index` — highest same-GW correlates with `total_points` (r ≈ 0.74, 0.70, 0.65) but all are computed post-match. Use only their lagged or rolling counterparts.
+
+**Same-GW target components — never use as features:**
+- `clean_sheets`, `goals_scored`, `assists` — direct components of `total_points`. Use only their rolling lags as form signals.
+
+**Crowd-signal leakage — lag before use:**
+- `transfers_in`, `transfers_out`, `selected` — same-GW transfer activity is reactive (35x spike after 15+ pt GWs per biases analysis). Lag by exactly 1 GW if included.
+
+**Post-season / future data — never use:**
+- `end_cost` or any post-season aggregate stats
 - **Target encoding** (if used): encode within CV folds only, never on full dataset
 
 ### 4.5 Feature catalogue
@@ -144,16 +155,19 @@ WHERE mng_win IS NULL          -- exclude manager cards (2024-25)
 - `season_id`, `gw`, `player_code`, `position_code`, `team_sk`
 
 **Fixture context:**
-- `was_home` (BOOLEAN) — mandatory; +12–20% home effect
-- `opponent_season_rank` (1–20) — mandatory; 30–50% pts penalty vs top-6
-- `team_goals_conceded_season` — mandatory for DEF/GK models
+- `was_home` (BOOLEAN) — mandatory; EDA-confirmed: GK +7.5%, DEF +18.7%, MID +11.1%, FWD +11.2%
+- `opponent_season_rank` (1–20) — mandatory; EDA-confirmed: DEF −33.8%, FWD −21.2%, GK −17.6%, MID −16.6% penalty vs top-6
+- `team_goals_conceded_season` — mandatory for DEF/GK models; explains 46.6% of variance in defensive player scoring
 
 **Player form (rolling — computed from prior GWs only):**
-- `pts_rolling_3gw`, `pts_rolling_5gw` — recent form
-- `mins_rolling_3gw` — availability / rotation signal
+- `pts_rolling_3gw`, `pts_rolling_5gw` — primary form indicators (lag-1 Pearson r = 0.378, Spearman rho = 0.650)
+- `mins_rolling_3gw` — availability / rotation signal (more predictive than pts in some cases)
 - `goals_rolling_5gw`, `assists_rolling_5gw` — attacking contribution
-- `cs_rolling_5gw` — defensive form (DEF/GK)
-- `bonus_rolling_5gw` — bonus point tendency
+- `cs_rolling_5gw` — defensive form (DEF/GK only)
+- `bonus_rolling_5gw` — bonus point tendency (FWDs: highest bonus rate at 0.352/app)
+- `saves_rolling_5gw` — GK only; rotation proxy (GK on pitch = positive saves count)
+
+**Rolling boundary rule:** Roll within `(player_code, season_id)` only. Never chain rolling features across season boundaries or across the 2019-20 COVID GW gap (season_id = 4, GW 29 → 39).
 
 **Season-to-date (cumulative — no leakage, always based on prior GWs):**
 - `season_pts_per_gw_to_date` — season average so far
@@ -179,14 +193,39 @@ WHERE mng_win IS NULL          -- exclude manager cards (2024-25)
 - `opponent_cs_rate_season` — proxy for opponent defensive strength
 
 ### 4.6 Position-specific feature subsets
-Not all features apply to all positions. Apply this filtering when building position models:
+
+Feature applicability by position:
 
 | Feature group | GK | DEF | MID | FWD |
 |--------------|:--:|:---:|:---:|:---:|
-| xGC / CS features | ✓ | ✓ | — | — |
-| Goals / xG features | — | — | ✓ | ✓ |
-| Saves features | ✓ | — | — | — |
-| Bonus / BPS | ✓ | ✓ | ✓ | ✓ |
+| xGC / CS / team_goals_conceded features | ✓ | ✓ | — | — |
+| Goals / xG / xGI features | — | — | ✓ | ✓ |
+| Saves / saves_rolling_5gw | ✓ | — | — | — |
+| Bonus rolling features | ✓ | ✓ | ✓ | ✓ |
+| opponent_season_rank / was_home | ✓ | ✓ | ✓ | ✓ |
+
+**Per-position guidance (EDA-confirmed):**
+
+**GK model:**
+- `team_cs_rolling_3gw` is the primary form signal — GK performance is a team-quality proxy (CS rate r = 0.795 with avg GW pts)
+- `team_goals_conceded_season` mandatory (team-season r = −0.683)
+- `saves_rolling_5gw` — weak individual predictor (r = −0.12) but useful as rotation indicator
+- Exclude `expected_goals` and `expected_assists` (near-zero for GKs)
+
+**DEF model:**
+- `team_goals_conceded_season` is the single most important feature (46.6% variance explained)
+- `opponent_season_rank` provides the fixture difficulty adjustment — most impactful for DEFs (−33.8% penalty vs top-6)
+- `was_home` — +18.7% home premium is the largest of any position
+- `cs_rolling_5gw` for individual defensive form
+
+**MID model:**
+- `xgi_rolling_5gw` (`expected_goal_involvements`) is the primary attacking signal (xG era)
+- Be aware: CV = 0.932 within MID vs 0.490 for FWD — higher residual error is structural, not a modelling failure
+- Consider `goals_scored / (goals_scored + assists + 0.01)` as a goal-vs-assist ratio feature to implicitly distinguish sub-roles (striker-like vs creator midfielders)
+
+**FWD model:**
+- `xg_rolling_5gw` is the primary signal
+- `bonus_rolling_5gw` — FWDs have the highest bonus rate (0.352/app) and bonus tends to be sticky for top scorers
 
 ### 4.7 Output
 - `ml/features.py` — `build_feature_matrix(position, era='xg')` → returns clean DataFrame
@@ -358,7 +397,9 @@ CV fold. Tune on validation fold; do not touch test fold.
 - **Method:** Expanding-window temporal CV — train on seasons 1…k, validate on k+1.
   Minimum training window: 2 seasons. Test window: 1 season.
 - **Never:** random train/test split (would leak future into training).
-- **Folds:** up to 7 folds (seasons 3→4, 4→5, …, 9→10) given 10-season dataset.
+- **Folds:** 3 folds within the xG era (season 7→8, seasons 7-8→9, seasons 7-9→10).
+  Rationale: Option A adopted (xG era only); the pre-xG seasons are excluded from training,
+  so cross-era folds are not applicable.
 
 ### 6.2 Primary metrics (per position, per model, per CV fold)
 
@@ -373,10 +414,9 @@ CV fold. Tune on validation fold; do not touch test fold.
 ### 6.3 Stratified evaluation
 All metrics computed separately for:
 - Position (GK / DEF / MID / FWD)
-- Home vs away
+- Home vs away — EDA-confirmed effects large enough to distort aggregate metrics if not disaggregated
 - Minutes bucket: starter (60+ mins), rotation (30–59), cameo (<30)
-- Opponent tier: top-6 vs rest
-- Era: pre-xG vs xG era (if training on all seasons)
+- Opponent tier: top-6 vs rest — EDA-confirmed −17% to −34% penalty by position
 - Price band (£5m brackets)
 
 ### 6.4 Calibration & diagnostics
@@ -394,11 +434,15 @@ top-10 precision. A model must beat the baseline on at least 2 of 3 primary metr
 be considered for production.
 
 ### 6.6 Known limitations to document
-- Model performance degrades for rotation/fringe players (training data is 75% elite starters)
-- Defensive predictions remain partially confounded by team quality even after normalisation
-- MID predictions have higher variance due to role heterogeneity (7x goals/90 range within MID)
-- Pre-2022-23 predictions lack xG-based features (if using all-seasons strategy)
-- No external injury or team-news data — biggest predictive gap not addressable from this dataset
+
+| Limitation | Quantified impact | Mitigation status |
+|------------|:-----------------:|-------------------|
+| MID sub-role heterogeneity | CV = 0.932 within MID vs 0.490 for FWD | Partially mitigated by xGI rolling features; residual variance is structural |
+| Survivorship bias | 75% of data from 30+ GW starters | Acknowledge degraded performance for rotation and fringe players in evaluation |
+| Cold-start players (no prior-season history) | 39.4% of players appear only 1 season | Fall back to `start_cost` + position priors; rolling features unavailable until GW 3+ |
+| Team quality confounding (DEF/GK) | 46.6% variance in DEF/GK pts explained by team goals conceded alone | Mitigated by `team_goals_conceded_season`; residual individual-skill signal remains weak |
+| No injury or team-news data | Largest unaddressable predictive gap | Document as primary model limitation; not fixable from this dataset |
+| 2019-20 COVID GW gap | GW 29 → 39 discontinuity in season_id = 4 | Enforce rolling boundary rule: no cross-gap feature chaining |
 
 ---
 
@@ -421,7 +465,7 @@ be considered for production.
 - Player search: career trajectory chart (pts/GW over all seasons)
 
 #### Page 2 — Bias & Data Quality
-- Bias summary table (from `logs/data_biases.md`)
+- Bias summary table (from `docs/data_biases.md`)
 - Missing data matrix: feature availability by season/era
 - Fixture difficulty effect: pts by opponent rank scatter
 - Price vs performance scatter (start_cost vs season_total_points)
@@ -517,5 +561,6 @@ defensive stats in 2025-26). Before each season's data is loaded:
 - Python for all code; SQLite for data storage
 - Validate each ETL stage before proceeding: `python -m etl.run`
 - Never join on `fpl_id` across seasons — always bridge via `player_code`
-- See `logs/data_biases.md` for full bias analysis and ML mitigation guidance
+- See `docs/data_biases.md` for full bias analysis and ML mitigation guidance
+- See `docs/eda_report.md` for EDA findings and Phase 4 recommendations (Section 2)
 - See `schema_design.md` for full DDL and schema rationale
