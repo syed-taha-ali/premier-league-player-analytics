@@ -1,0 +1,16 @@
+# Core data
+pandas==2.3.3
+numpy==2.4.2
+pyarrow==23.0.1
+
+# Visualisation
+matplotlib==3.10.8
+seaborn==0.13.2
+
+# Statistics
+scipy==1.17.0
+
+# Notebook (required to run eda/eda_report.ipynb)
+jupyter==1.1.1
+ipykernel==7.2.0
+nbconvert==7.17.0

@@ -13,7 +13,7 @@
 | 1 | Data Collection |  Complete |
 | 2 | Data Cleaning |  Complete |
 | 3 | EDA |  Complete |
-| 4 | Feature Engineering |  Not started |
+| 4 | Feature Engineering |  Complete |
 | 5 | Modelling |  Not started |
 | 6 | Evaluation |  Not started |
 | 7 | Interactive Dashboard & Visualisations |  Not started |
@@ -278,7 +278,7 @@ Every model type that could plausibly be applied to this dataset, with honest as
 | Model | Description | Pros | Cons |
 |-------|-------------|------|------|
 | **XGBoost** | Gradient boosting with regularisation | Excellent performance; native NULL handling; SHAP support | Slower than LightGBM |
-| **LightGBM** | Leaf-wise gradient boosting | Fastest on tabular data; excellent at this scale; SHAP support | Overfits small datasets (not an issue here) |
+| **LightGBM** | Leaf-wise gradient boosting | Fastest on tabular data; excellent at this scale; SHAP support | Overfits small datasets — not an issue for DEF/MID, but GK Fold 1 has only 745 training rows; use conservative hyperparameters for GK (see §5.3) |
 | **CatBoost** | Gradient boosting with native categorical support | Handles `position`, `team`, `era_id` without encoding | Slower than LightGBM; less common |
 | **HistGradientBoosting** | sklearn's GB with histogram binning | Pure sklearn; no extra dependencies | Less configurable than XGB/LGBM |
 
@@ -382,6 +382,28 @@ ml/
 models/
 └── {position}_{model}.pkl
 ```
+
+**NaN handling:** Feature matrices contain ~4.5% NaN in player rolling features (first GW
+of each player-season) and ~2.8% NaN in team/opponent features (first fixture of each
+team-season). LightGBM handles NaN natively — no action needed. Ridge requires imputation
+before `fit()`; use mean imputation computed within the training fold only, stratified by
+`(position, season_id)` to avoid contaminating early-season rows with mid-season averages.
+Never fit the imputer on the full dataset or on the validation fold.
+
+**Feature scaling:** Ridge requires standardisation; LightGBM does not. Fit a
+`StandardScaler` on the training fold only and apply the same fitted scaler to the
+validation fold. Do not refit on the validation fold.
+
+**Position-specific LightGBM starting hyperparameters:**
+
+| Position | `num_leaves` | `min_child_samples` | `learning_rate` | `n_estimators` | Rationale |
+|----------|:------------:|:-------------------:|:---------------:|:--------------:|-----------|
+| GK | 15 | 30 | 0.05 | 200 | Only 745 training rows in Fold 1 — aggressive regularisation required |
+| DEF | 31 | 20 | 0.05 | 300 | Comfortable row count; standard regularisation |
+| MID | 31 | 20 | 0.05 | 300 | Largest position; standard regularisation |
+| FWD | 31 | 20 | 0.05 | 300 | Fold 1 is marginal (1,459 rows) but viable at standard settings |
+
+These are starting points for hyperparameter search, not fixed values.
 
 **Hyperparameter tuning:** Optuna (Bayesian search) or sklearn GridSearchCV within each
 CV fold. Tune on validation fold; do not touch test fold.
