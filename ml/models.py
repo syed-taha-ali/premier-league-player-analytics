@@ -1184,7 +1184,7 @@ def _predict_stacking(
     return meta_model.predict(scaler.transform(preds_arr))
 
 
-# Batch 4 registrations --------------------------------------------------
+# Batch 4 registrations (inserted before Batch 5 below) -----------------
 
 _register(ModelSpec(
     name='mlp',
@@ -1220,6 +1220,511 @@ _register(ModelSpec(
 
 
 # ---------------------------------------------------------------------------
+# Batch 5: minutes_model, component_model (decomposed), poly_ridge (tabular),
+#          blending (meta)
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Shared helpers for decomposed models
+# ---------------------------------------------------------------------------
+
+def _load_raw_gw_cols(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """
+    Load raw per-GW fact columns from fpl.db and left-join onto df.
+
+    df must contain: player_code, season_id, gw, fixture_id.
+    Returns df with the requested columns merged in.
+    """
+    import sqlite3
+    from pathlib import Path
+
+    db_path = Path(__file__).parent.parent / 'db' / 'fpl.db'
+    keys    = ['player_code', 'season_id', 'gw', 'fixture_id']
+    col_str = ', '.join(keys + columns)
+    conn    = sqlite3.connect(str(db_path))
+    raw     = pd.read_sql_query(
+        f'SELECT {col_str} FROM fact_gw_player WHERE mng_win IS NULL', conn
+    )
+    conn.close()
+    for k in keys:
+        if k in raw.columns and k in df.columns:
+            raw[k] = raw[k].astype(df[k].dtype)
+    return df.merge(raw, on=keys, how='left')
+
+
+def _apply_stored_imputation(
+    X: pd.DataFrame,
+    feat_cols: list[str],
+    season_means: pd.DataFrame,
+    global_means: pd.Series,
+    sid: pd.Series | None,
+) -> np.ndarray:
+    """Apply stored per-season mean imputation. Returns filled float array."""
+    X_arr = X[feat_cols].reset_index(drop=True).values.astype(float)
+    gm    = global_means[feat_cols].values
+
+    if sid is not None:
+        s_vals = sid.reset_index(drop=True).values
+        fill   = np.empty_like(X_arr)
+        for i, s in enumerate(s_vals):
+            fill[i] = (
+                season_means.loc[s, feat_cols].values
+                if s in season_means.index else gm
+            )
+        fill = np.where(np.isnan(fill), gm, fill)
+    else:
+        fill = np.tile(gm, (len(X_arr), 1))
+
+    nan_mask = np.isnan(X_arr)
+    X_filled = np.where(nan_mask, fill, X_arr)
+    return np.where(np.isnan(X_filled), gm, X_filled)
+
+
+# ---------------------------------------------------------------------------
+# minutes_model (decomposed_minutes)
+# ---------------------------------------------------------------------------
+
+_CLF_FEATURE_COLS = [
+    'mins_rolling_3gw',
+    'season_starts_rate_to_date',
+    'value_lag1',
+    'transfers_in_lag1',
+]
+
+
+def _build_minutes_model(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    position: str,
+    X_val: pd.DataFrame | None = None,
+    y_val: pd.Series | None = None,
+    sid_train: pd.Series | None = None,
+    sid_val: pd.Series | None = None,
+    **kwargs,
+) -> dict:
+    """
+    Two-stage decomposed model.
+    Stage 1 : LogisticRegression on rotation-signal features -> P(starts)
+    Stage 2a: Ridge on full feature set for started rows -> E[pts | started]
+    Stage 2b: Ridge on full feature set for benched rows -> E[pts | benched]
+    Prediction: P(starts)*E[pts|started] + (1-P(starts))*E[pts|benched]
+
+    Loads actual 'starts' column from fpl.db via _train_df context kwarg.
+    Falls back to season_starts_rate_to_date >= 0.5 threshold if unavailable.
+    """
+    from sklearn.linear_model import LogisticRegression, Ridge
+    from sklearn.preprocessing import StandardScaler
+    from ml.evaluate import stratified_impute
+
+    _train_df = kwargs.get('_train_df')
+
+    # Load starts target from fpl.db (training rows only — no leakage)
+    if _train_df is not None:
+        tr_aug   = _load_raw_gw_cols(
+            _train_df[['player_code', 'season_id', 'gw', 'fixture_id']], ['starts']
+        )
+        y_starts = tr_aug['starts'].fillna(0).astype(int).values
+    else:
+        y_starts = (
+            X_train['season_starts_rate_to_date'].fillna(0.5) >= 0.5
+        ).astype(int).values
+
+    starts_mask = y_starts == 1
+    n_started   = int(starts_mask.sum())
+    n_benched   = int((~starts_mask).sum())
+    log.info(f'[minutes_model] {position}: n_started={n_started}, n_benched={n_benched}')
+
+    # Single impute pass for the full feature set
+    if X_val is not None and sid_val is not None:
+        X_tr_f, X_v_f, season_means, global_means = stratified_impute(
+            X_train, X_val, sid_train, sid_val
+        )
+    else:
+        X_tr_f, _, season_means, global_means = stratified_impute(
+            X_train, X_train, sid_train, sid_train
+        )
+        X_v_f = None
+
+    feat_cols = list(X_train.columns)
+    clf_cols  = [c for c in _CLF_FEATURE_COLS if c in feat_cols]
+    clf_idx   = [feat_cols.index(c) for c in clf_cols]
+
+    scaler  = StandardScaler()
+    X_tr_s  = scaler.fit_transform(X_tr_f)
+
+    # Stage 1: LogisticRegression on clf feature subset
+    clf = LogisticRegression(random_state=42, max_iter=500, C=1.0)
+    clf.fit(X_tr_s[:, clf_idx], y_starts)
+
+    # Stage 2: Ridge sub-models; fall back to full data when split is too small
+    _MIN        = 10
+    reg_started = Ridge(alpha=1.0, random_state=42)
+    reg_benched = Ridge(alpha=1.0, random_state=42)
+    reg_started.fit(
+        X_tr_s[starts_mask]  if n_started >= _MIN else X_tr_s,
+        y_train.values[starts_mask] if n_started >= _MIN else y_train.values,
+    )
+    reg_benched.fit(
+        X_tr_s[~starts_mask] if n_benched >= _MIN else X_tr_s,
+        y_train.values[~starts_mask] if n_benched >= _MIN else y_train.values,
+    )
+
+    preds = None
+    if X_v_f is not None:
+        X_v_s   = scaler.transform(X_v_f)
+        p_start = clf.predict_proba(X_v_s[:, clf_idx])[:, 1]
+        preds   = (
+            p_start * reg_started.predict(X_v_s)
+            + (1 - p_start) * reg_benched.predict(X_v_s)
+        )
+
+    return {
+        'clf':          clf,
+        'clf_cols':     clf_cols,
+        'clf_idx':      clf_idx,
+        'reg_started':  reg_started,
+        'reg_benched':  reg_benched,
+        'scaler':       scaler,
+        'season_means': season_means,
+        'global_means': global_means,
+        'feature_cols': feat_cols,
+        'preds':        preds,
+    }
+
+
+def _predict_minutes_model(
+    bundle: dict,
+    X: pd.DataFrame,
+    sid: pd.Series | None = None,
+    **kwargs,
+) -> np.ndarray:
+    feat_cols    = bundle['feature_cols']
+    season_means = bundle['season_means']
+    global_means = bundle['global_means']
+    scaler       = bundle['scaler']
+    clf          = bundle['clf']
+    clf_idx      = bundle['clf_idx']
+    reg_started  = bundle['reg_started']
+    reg_benched  = bundle['reg_benched']
+
+    X_filled = _apply_stored_imputation(X, feat_cols, season_means, global_means, sid)
+    X_s      = scaler.transform(X_filled)
+    p_start  = clf.predict_proba(X_s[:, clf_idx])[:, 1]
+    return (
+        p_start * reg_started.predict(X_s)
+        + (1 - p_start) * reg_benched.predict(X_s)
+    )
+
+
+# ---------------------------------------------------------------------------
+# component_model (decomposed_components)
+# ---------------------------------------------------------------------------
+
+_SCORING_RULES: dict[str, dict[str, int]] = {
+    'GK':  {'goals': 6, 'assists': 3, 'cs': 6, 'bonus': 1},
+    'DEF': {'goals': 6, 'assists': 3, 'cs': 6, 'bonus': 1},
+    'MID': {'goals': 5, 'assists': 3, 'cs': 1, 'bonus': 1},
+    'FWD': {'goals': 4, 'assists': 3, 'cs': 0, 'bonus': 1},
+}
+
+_COMPONENT_DB_COLS: dict[str, str] = {
+    'goals':   'goals_scored',
+    'assists':  'assists',
+    'cs':       'clean_sheets',
+    'bonus':    'bonus',
+}
+
+
+def _build_component_model(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    position: str,
+    X_val: pd.DataFrame | None = None,
+    y_val: pd.Series | None = None,
+    sid_train: pd.Series | None = None,
+    sid_val: pd.Series | None = None,
+    **kwargs,
+) -> dict:
+    """
+    One Ridge regression per FPL scoring component (goals, assists, clean_sheet, bonus).
+    Prediction = sum(ridge_pred[component] * scoring_rule[component]).
+
+    Loads component target columns from fpl.db via _train_df context kwarg.
+    Components with scoring_rule == 0 for the position are skipped.
+    """
+    from sklearn.linear_model import Ridge
+    from sklearn.preprocessing import StandardScaler
+    from ml.evaluate import stratified_impute
+
+    _train_df = kwargs.get('_train_df')
+    scoring   = _SCORING_RULES[position]
+
+    # Load component columns from DB
+    if _train_df is not None:
+        tr_aug = _load_raw_gw_cols(
+            _train_df[['player_code', 'season_id', 'gw', 'fixture_id']],
+            list(_COMPONENT_DB_COLS.values()),
+        )
+    else:
+        tr_aug = pd.DataFrame()
+
+    # Shared imputation for all sub-models
+    if X_val is not None and sid_val is not None:
+        X_tr_f, X_v_f, season_means, global_means = stratified_impute(
+            X_train, X_val, sid_train, sid_val
+        )
+    else:
+        X_tr_f, _, season_means, global_means = stratified_impute(
+            X_train, X_train, sid_train, sid_train
+        )
+        X_v_f = None
+
+    scaler = StandardScaler()
+    X_tr_s = scaler.fit_transform(X_tr_f)
+
+    sub_models: dict[str, object] = {}
+    for comp, db_col in _COMPONENT_DB_COLS.items():
+        if scoring.get(comp, 0) == 0:
+            sub_models[comp] = None
+            continue
+        y_comp = (
+            tr_aug[db_col].fillna(0).values
+            if db_col in tr_aug.columns
+            else np.zeros(len(X_tr_s))
+        )
+        ridge = Ridge(alpha=1.0, random_state=42)
+        ridge.fit(X_tr_s, y_comp)
+        sub_models[comp] = ridge
+
+    preds = None
+    if X_v_f is not None:
+        X_v_s = scaler.transform(X_v_f)
+        preds = np.zeros(len(X_v_s))
+        for comp, ridge in sub_models.items():
+            if ridge is not None:
+                preds += ridge.predict(X_v_s) * scoring[comp]
+
+    return {
+        'models':        sub_models,
+        'scaler':        scaler,
+        'season_means':  season_means,
+        'global_means':  global_means,
+        'scoring_rules': scoring,
+        'feature_cols':  list(X_train.columns),
+        'preds':         preds,
+    }
+
+
+def _predict_component_model(
+    bundle: dict,
+    X: pd.DataFrame,
+    sid: pd.Series | None = None,
+    **kwargs,
+) -> np.ndarray:
+    feat_cols    = bundle['feature_cols']
+    season_means = bundle['season_means']
+    global_means = bundle['global_means']
+    scaler       = bundle['scaler']
+    sub_models   = bundle['models']
+    scoring      = bundle['scoring_rules']
+
+    X_filled = _apply_stored_imputation(X, feat_cols, season_means, global_means, sid)
+    X_s      = scaler.transform(X_filled)
+    preds    = np.zeros(len(X_s))
+    for comp, ridge in sub_models.items():
+        if ridge is not None:
+            preds += ridge.predict(X_s) * scoring[comp]
+    return preds
+
+
+# ---------------------------------------------------------------------------
+# poly_ridge (Tier 3 standalone, tabular)
+# ---------------------------------------------------------------------------
+
+def _build_poly_ridge(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    position: str,
+    X_val: pd.DataFrame | None = None,
+    y_val: pd.Series | None = None,
+    sid_train: pd.Series | None = None,
+    sid_val: pd.Series | None = None,
+    **kwargs,
+) -> dict:
+    """
+    Degree-2 pairwise interaction features + Ridge.
+    Pipeline: impute -> scale -> PolynomialFeatures(interaction_only=True) -> Ridge.
+
+    With n=20 features, interaction_only=True gives C(20,2)=190 cross-product
+    terms plus the original 20, totalling 210 features fed to Ridge.
+    """
+    from sklearn.linear_model import Ridge
+    from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+    from ml.evaluate import stratified_impute
+
+    if X_val is not None and sid_val is not None:
+        X_tr_f, X_v_f, season_means, global_means = stratified_impute(
+            X_train, X_val, sid_train, sid_val
+        )
+    else:
+        X_tr_f, _, season_means, global_means = stratified_impute(
+            X_train, X_train, sid_train, sid_train
+        )
+        X_v_f = None
+
+    scaler  = StandardScaler()
+    X_tr_s  = scaler.fit_transform(X_tr_f)
+    poly    = PolynomialFeatures(degree=2, interaction_only=True, include_bias=False)
+    X_tr_p  = poly.fit_transform(X_tr_s)
+    model   = Ridge(alpha=1.0, random_state=42)
+    model.fit(X_tr_p, y_train.values)
+
+    preds = None
+    if X_v_f is not None:
+        preds = model.predict(poly.transform(scaler.transform(X_v_f)))
+
+    return {
+        'model':        model,
+        'scaler':       scaler,
+        'poly':         poly,
+        'season_means': season_means,
+        'global_means': global_means,
+        'feature_cols': list(X_train.columns),
+        'preds':        preds,
+    }
+
+
+def _predict_poly_ridge(
+    bundle: dict,
+    X: pd.DataFrame,
+    sid: pd.Series | None = None,
+    **kwargs,
+) -> np.ndarray:
+    feat_cols    = bundle['feature_cols']
+    season_means = bundle['season_means']
+    global_means = bundle['global_means']
+    scaler       = bundle['scaler']
+    poly         = bundle['poly']
+    model        = bundle['model']
+
+    X_filled = _apply_stored_imputation(X, feat_cols, season_means, global_means, sid)
+    return model.predict(poly.transform(scaler.transform(X_filled)))
+
+
+# ---------------------------------------------------------------------------
+# blending (Tier 3, meta)
+#
+# Same OOF accumulation mechanism as stacking; differentiated by deps
+# (top-performing models rather than diverse ensemble) and an ElasticNet
+# meta-learner instead of Ridge.
+# ---------------------------------------------------------------------------
+
+def _build_blending(
+    dep_preds: dict,
+    y_val: np.ndarray,
+    position: str,
+    **kwargs,
+) -> dict:
+    """
+    Blending meta-learner using ElasticNet (l1_ratio=0.5, alpha=0.5).
+    Fitted on fold 1+2 OOF val predictions (_oof_records), evaluated on fold 3.
+    Single-fold evaluation is intentional for this Tier 3 model.
+    """
+    from sklearn.linear_model import ElasticNet as _EN
+    from sklearn.preprocessing import StandardScaler as _Scaler
+
+    _oof_records = kwargs.get('_oof_records', [])
+    base_models  = [m for m, p in dep_preds.items() if p is not None]
+
+    def _fallback(preds: np.ndarray) -> dict:
+        return {
+            'meta_model':  None,
+            'scaler':      None,
+            'base_models': base_models,
+            'feature_cols': base_models,
+            'preds':        preds,
+        }
+
+    if not base_models:
+        return _fallback(np.zeros(len(y_val)))
+
+    X_meta_v = np.column_stack([dep_preds[m] for m in base_models])
+
+    if len(_oof_records) < 2:
+        return _fallback(X_meta_v.mean(axis=1))
+
+    oof_Xs, oof_ys = [], []
+    for record in _oof_records:
+        available = [m for m in base_models if record.get(m) is not None]
+        if available:
+            oof_Xs.append(np.column_stack([record[m] for m in available]))
+            oof_ys.append(record['y'])
+
+    if not oof_Xs:
+        return _fallback(X_meta_v.mean(axis=1))
+
+    X_meta_tr = np.vstack(oof_Xs)
+    y_meta_tr = np.concatenate(oof_ys)
+
+    scaler     = _Scaler()
+    meta_model = _EN(l1_ratio=0.5, alpha=0.5, max_iter=2000, random_state=42)
+    meta_model.fit(scaler.fit_transform(X_meta_tr), y_meta_tr)
+    preds = meta_model.predict(scaler.transform(X_meta_v))
+
+    return {
+        'meta_model':  meta_model,
+        'scaler':      scaler,
+        'base_models': base_models,
+        'feature_cols': base_models,
+        'preds':        preds,
+    }
+
+
+# Batch 5 registrations --------------------------------------------------
+
+_register(ModelSpec(
+    name='minutes_model',
+    family='decomposed',
+    tier=2,
+    requires_imputation=True,
+    requires_scaling=True,
+    build_fn=_build_minutes_model,
+    predict_fn=_predict_minutes_model,
+))
+
+_register(ModelSpec(
+    name='component_model',
+    family='decomposed',
+    tier=3,
+    requires_imputation=True,
+    requires_scaling=True,
+    build_fn=_build_component_model,
+    predict_fn=_predict_component_model,
+))
+
+_register(ModelSpec(
+    name='poly_ridge',
+    family='tabular',
+    tier=3,
+    requires_imputation=True,
+    requires_scaling=True,
+    build_fn=_build_poly_ridge,
+    predict_fn=_predict_poly_ridge,
+))
+
+_register(ModelSpec(
+    name='blending',
+    family='meta',
+    tier=3,
+    requires_imputation=False,
+    requires_scaling=False,
+    build_fn=_build_blending,
+    predict_fn=_predict_stacking,  # same inference mechanism as stacking
+    deps=['ridge', 'bayesian_ridge', 'poisson_glm', 'mlp'],
+))
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -1238,8 +1743,8 @@ def get_model(name: str) -> ModelSpec:
 
 
 def tabular_models() -> list[ModelSpec]:
-    """All models with family='tabular', in registration order."""
-    return [s for s in _REGISTRY.values() if s.family == 'tabular']
+    """All models with family='tabular' or 'decomposed', in registration order."""
+    return [s for s in _REGISTRY.values() if s.family in ('tabular', 'decomposed')]
 
 
 def meta_models() -> list[ModelSpec]:

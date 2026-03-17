@@ -171,7 +171,7 @@ def train_position(
     """Train all requested models for one position."""
     registry = get_registry()
     if models is None:
-        model_names = [n for n, s in registry.items() if s.family == 'tabular']
+        model_names = [n for n, s in registry.items() if s.family in ('tabular', 'decomposed')]
     else:
         model_names = list(models)
         for name in model_names:

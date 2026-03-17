@@ -28,7 +28,7 @@ per-model bundle specs, and verification gates) see `revised_modelling_implement
 | Ridge Regression | OLS + L2 penalty | 1 | Implemented |
 | Lasso Regression | OLS + L1 penalty | 3 | Implemented |
 | ElasticNet | L1 + L2 combined | 2 | Implemented |
-| Polynomial + Ridge | Degree-2 interactions + Ridge | 3 | Not implemented |
+| Polynomial + Ridge | Degree-2 interactions + Ridge | 3 | Implemented |
 | Poisson GLM | GLM with log link | 2 | Implemented |
 
 ### C — Tree-Based Models
@@ -70,8 +70,8 @@ per-model bundle specs, and verification gates) see `revised_modelling_implement
 
 | Model | Description | Tier | Status |
 |-------|-------------|:----:|--------|
-| Goals + Assists + CS + Bonus separately | One model per scoring component | 3 | Not implemented |
-| Minutes model first | Predict P(starts), then conditional pts | 2 | Not implemented |
+| Goals + Assists + CS + Bonus separately | One model per scoring component | 3 | Implemented |
+| Minutes model first | Predict P(starts), then conditional pts | 2 | Implemented |
 
 ### H — Ensemble / Stacking
 
@@ -79,7 +79,7 @@ per-model bundle specs, and verification gates) see `revised_modelling_implement
 |-------|-------------|:----:|--------|
 | Simple Averaging | Average predictions of multiple models | 2 | Implemented |
 | Stacking (meta-learner) | Train meta-model on OOF predictions | 3 | Implemented |
-| Blending | Average on a held-out set | 3 | Not implemented |
+| Blending | Average on a held-out set | 3 | Implemented |
 
 ### I — Not Recommended
 
