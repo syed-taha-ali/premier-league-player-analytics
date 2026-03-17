@@ -509,57 +509,73 @@ generate a prediction CSV, then load it alongside the tabular predictions. A ful
 
 ---
 
-## Phase 8 — Deployment
+## Phase 8 — Deployment (Complete)
 
-### 8.1 Pre-deployment steps (before freezing production model)
+**Delivered:** branch `feature/phase8-deployment`, commits `97851e2`–`b2408a8`.
+**Report:** `docs/deployment_report.md`
 
-These steps are recommended before finalising the deployment build, based on Phase 5/6 findings:
+### 8.1 Pre-deployment model improvements (delivered)
 
-1. **Run Optuna tuning for LightGBM:** `python -m ml.train --tune` (40 trials, TPE sampler on
-   fold 3). FWD is the highest priority — it has the widest LightGBM–Ridge gap and the most
-   to gain from tuning. Expected to close the gap materially but not definitively.
+**Ridge alpha search** (`--alpha-search` flag on `ml/train.py`):
+Best alphas — GK: 10.0 | DEF: 0.1 | MID: 0.1 | FWD: 0.1
+Results logged to `logs/training/ridge_alpha_search.csv`.
 
-2. **Alpha search for Ridge:** Fit Ridge with `alpha in [0.1, 0.5, 1.0, 5.0, 10.0]` within
-   the existing 3-fold CV framework. Expected MAE improvement: 0.02–0.05 pts. Low effort.
+**Drop `xgi_rolling_5gw` from Ridge for MID and FWD** (`ml/models.py _build_ridge`):
+Eliminates negative xgi coefficient caused by xg+xa+xgi collinearity. MID/FWD lose 0.005/0.016
+MAE compared to Phase 6 (expected cost of removing a redundant but correlated feature).
 
-3. **Drop `xgi_rolling_5gw` from Ridge feature set for MID and FWD:** The xG feature cluster
-   (`xg`, `xa`, `xgi`) is collinear and causes Ridge to assign a negative coefficient to `xgi`.
-   The composite prediction is correct, but dropping `xgi` from Ridge (while retaining it for
-   LightGBM which handles collinearity naturally) may give a cleaner linear model.
+**Updated CV mean MAE (Ridge, post-Phase-8):**
+GK 2.130 (alpha=10.0) | DEF 2.138 (alpha=0.1) | MID 1.835 (alpha=0.1) | FWD 2.270 (alpha=0.1)
 
-### 8.2 Model serialisation
-- All 168 artefacts already serialised to `models/` — see Phase 5 deliverables
-- Format: `models/{position}_{model}.pkl` (bundle) + `models/{position}_{model}_meta.json`
-- Version models by season: `models/v{season_id}/` — never overwrite prior season models
-- **Default production model:** `ridge` for all positions. Imputer state (`season_means`,
-  `global_means`) is serialised in the bundle. For inference on an unseen season (e.g. season 11
-  GW1), the model falls back to `global_means` automatically — no code change required.
+All 168 model artefacts and meta-models retrained.
 
-### 8.3 Prediction pipeline
-**Entry point:** `ml/predict.py`
+**Optuna LightGBM tuning:** deferred. `python -m ml.train --tune` is implemented and ready.
+FWD is highest priority. Run before end-of-season retraining.
 
-**Inputs:**
-- Next GW number and season
-- Optional: specific model name(s) — defaults to `ridge`
+### 8.2 Model serialisation (delivered)
+- All 168 artefacts serialised: `models/{position}_{model}.pkl` + `models/{position}_{model}_meta.json`
+- `.pkl` files are gitignored (binary). `_meta.json` files are committed.
+- **Default production model:** `ridge` for all positions.
+- Versioned model directories (`models/v{season_id}/`) are not yet implemented — use flat layout for now.
 
-**Process:**
-1. Call `build_feature_matrix(position)` — queries `db/fpl.db`, applies base filter and rolling features
-2. Filter to target GW rows
-3. Load serialised bundle via `load_model(position, model_name)`
-4. Call `spec.predict_fn(bundle, X, ...)` — meta-models auto-chain their base models
-5. Combine all positions into a single ranked DataFrame
+### 8.3 Live data pipeline (delivered)
 
-**Output:**
-- `outputs/predictions/gw{N}_s{season}_predictions.csv` — player, position, team, gw, season_id,
-  total_points (actual, if available), pred_{model}, pred_ensemble (if multiple models)
-- Console summary: top-5 predicted per position
+**`etl/fetch.py`** — FPL API client:
+- `fetch_bootstrap()`, `fetch_fixtures()`, `fetch_gw_live(gw)` — three primary endpoints
+- `build_merged_gw()` — transforms API response to `merged_gw.csv` schema
+- `write_season_csvs()` — appends GW rows (deduplicates on GW+fixture); overwrites `players_raw.csv`
+- Exponential backoff retry (3 attempts); `FetchError` on critical endpoint failure
+- Standalone: `python -m etl.fetch --gw 30 --season 2025-26`
 
-### 8.4 Retraining cadence
-- **End of season:** Retrain all models with new season appended to training data.
-  Run full CV on new fold (new season as held-out test). Retrain meta-models from updated
-  OOF parquets: `python -m ml.train --all`.
-- **Mid-season trigger:** If rolling MAE (last 5 GWs) exceeds 1.5× baseline MAE,
-  flag for review. Retrain if confirmed performance degradation. See Phase 9 for thresholds.
+**`run_gw.py`** — end-to-end GW runner:
+```
+Step 1  Fetch    etl/fetch.py writes CSVs to data/{season}/
+Step 2  ETL      python -m etl.run (full rebuild, ~16s, 11 validation checks)
+Step 3  Predict  ml/predict.predict_gw() -> outputs/predictions/gw{N}_s{season}_predictions.csv
+Step 4  Monitor  MAE/RMSE/Spearman/top-10 -> logs/monitoring/monitoring_log.csv
+```
+Flags: `--gw`, `--season`, `--skip-fetch`, `--skip-etl`, `--model`
+
+**ETL validation fix:** Points reconciliation check (#6 in `etl/validate.py`) now scoped to
+completed seasons only. The in-progress season is excluded — FPL retroactive corrections
+accumulate in `players_raw.csv` but are not back-propagated to individual GW rows.
+
+**Feature matrix cache:** `outputs/features/*.parquet` must be cleared after adding new GWs.
+Cache is rebuilt automatically on next `build_feature_matrix` call.
+
+**Tested:** GW 24 (static data) and GW 30 (live fetch from FPL API). All 11 ETL checks pass.
+No monitoring alerts on either GW.
+
+### 8.4 Monitoring infrastructure (delivered)
+
+`logs/monitoring/monitoring_log.csv` — schema:
+`season_id, gw, model, position, mae, rmse, spearman, top10_precision, rolling_mae_5gw, threshold, alert, logged_at`
+
+Alert thresholds (1.5× baseline MAE): GK 3.494 | DEF 3.498 | MID 2.996 | FWD 3.609
+
+### 8.5 Retraining cadence
+- **End of season:** `python -m ml.train --all` with new season appended. Run full CV on new fold.
+- **Mid-season trigger:** 5-GW rolling MAE > threshold in monitoring log → flag for review.
 
 ---
 
