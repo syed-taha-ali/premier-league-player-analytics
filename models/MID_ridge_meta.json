@@ -13,7 +13,6 @@
     "bonus_rolling_5gw",
     "xg_rolling_5gw",
     "xa_rolling_5gw",
-    "xgi_rolling_5gw",
     "season_pts_per_gw_to_date",
     "season_starts_rate_to_date",
     "start_cost",
@@ -30,7 +29,7 @@
     10
   ],
   "n_train_rows": 19495,
-  "trained_at": "2026-03-17T20:59:35.633793+00:00",
+  "trained_at": "2026-03-17T23:19:34.399245+00:00",
   "cv_mae_by_fold": [
     1.7746,
     1.791,
