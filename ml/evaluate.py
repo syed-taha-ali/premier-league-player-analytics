@@ -6,10 +6,8 @@ CV folds (xG era, seasons 7-10):
     Fold 2: train seasons 7-8,     validate season  9   (2022-24 -> 2024-25)
     Fold 3: train seasons 7-8-9,   validate season 10   (2022-25 -> 2025-26)
 
-Models:
-    baseline  -- rolling 5-GW mean (pts_rolling_5gw); no fitting
-    ridge     -- Ridge regression with StandardScaler + stratified mean imputation
-    lgbm      -- LightGBM with position-specific hyperparameters
+Models are defined in ml/models.py (registry). The CV loop iterates over all
+registered tabular models (Pass 1) and all registered meta-models (Pass 2).
 
 Usage:
     python -m ml.evaluate                     # all positions, default hyperparams
@@ -51,6 +49,7 @@ except ImportError:
     HAS_SHAP = False
 
 from ml.features import build_feature_matrix, CONTEXT_COLS, TARGET_COL, VALID_POSITIONS
+from ml.models import tabular_models, meta_models, get_registry
 
 warnings.filterwarnings('ignore', category=UserWarning)
 warnings.filterwarnings('ignore', category=FutureWarning)
@@ -419,9 +418,10 @@ def run_cv(
     feat_cols = get_feature_cols(df)
     log.info(f"[cv] {position}: {len(df):,} rows, {len(feat_cols)} features")
 
-    records   = []
-    all_preds = []
-    last_models: dict = {}
+    records     = []
+    all_preds   = []
+    last_models: dict  = {}
+    oof_records: list[dict] = []   # accumulates tabular val predictions across folds for stacking
 
     for fold_idx, (train_seasons, val_season) in enumerate(CV_FOLDS, start=1):
         train_df, val_df = split_fold(df, train_seasons, val_season)
@@ -437,48 +437,73 @@ def run_cv(
         sid_v   = val_df['season_id'].reset_index(drop=True)
         gw_keys = (val_df['season_id'].values * 1000 + val_df['gw'].values)
 
-        # ---- Baseline ----
-        bl_preds = baseline_predict(X_val, float(y_train.mean()))
-        _record_metrics(records, fold_idx, 'baseline', y_val.values, bl_preds, gw_keys, val_df)
+        # ---- Pass 1: tabular models ----
+        fold_bundles: dict[str, dict] = {}
+        for spec in tabular_models():
+            bundle = spec.build_fn(
+                X_train, y_train, position,
+                X_val=X_val, y_val=y_val,
+                sid_train=sid_tr, sid_val=sid_v,
+                tune=tune_lgbm,
+                _train_df=train_df,
+                _val_df=val_df,
+            )
+            preds = bundle['preds']
+            _record_metrics(records, fold_idx, spec.name, y_val.values, preds, gw_keys, val_df)
+            fold_bundles[spec.name] = bundle
 
-        # ---- Ridge ----
-        ridge_bundle = build_ridge(X_train, y_train, sid_tr, X_val, sid_v)
-        ridge_preds  = ridge_bundle['preds']
-        _record_metrics(records, fold_idx, 'ridge', y_val.values, ridge_preds, gw_keys, val_df)
+        # Collect tabular val predictions for stacking OOF (used in later folds)
+        oof_entry: dict = {'y': y_val.values}
+        for _oname, _ob in fold_bundles.items():
+            if _ob.get('preds') is not None:
+                oof_entry[_oname] = _ob['preds']
 
-        # ---- LightGBM ----
-        lgbm_bundle = build_lgbm(
-            X_train, y_train, position, X_val, y_val, tune=tune_lgbm
-        )
-        lgbm_preds = lgbm_bundle['preds']
-        _record_metrics(records, fold_idx, 'lgbm', y_val.values, lgbm_preds, gw_keys, val_df)
+        # ---- Pass 2: meta-models (fit on Pass 1 val predictions) ----
+        for spec in meta_models():
+            if not all(d in fold_bundles for d in spec.deps):
+                log.warning(f"[cv] Skipping meta-model {spec.name}: deps not satisfied")
+                continue
+            dep_preds = {d: fold_bundles[d]['preds'] for d in spec.deps}
+            bundle = spec.build_fn(
+                dep_preds, y_val.values, position,
+                _oof_records=list(oof_records),
+            )
+            preds = bundle['preds']
+            _record_metrics(records, fold_idx, spec.name, y_val.values, preds, gw_keys, val_df)
+            fold_bundles[spec.name] = bundle
+
+        # Append current fold after Pass 2 so stacking uses only previous folds
+        oof_records.append(oof_entry)
 
         # ---- Collect predictions ----
         fold_pred = val_df[CONTEXT_COLS + [TARGET_COL]].copy().reset_index(drop=True)
-        fold_pred['fold']          = fold_idx
-        fold_pred['pred_baseline'] = bl_preds
-        fold_pred['pred_ridge']    = ridge_preds
-        fold_pred['pred_lgbm']     = lgbm_preds
+        fold_pred['fold'] = fold_idx
+        for name, bundle in fold_bundles.items():
+            if bundle.get('preds') is not None:
+                fold_pred[f'pred_{name}'] = bundle['preds']
+            if bundle.get('pred_std') is not None:
+                fold_pred[f'pred_std_{name}'] = bundle['pred_std']
         all_preds.append(fold_pred)
 
         # Keep fold 3 models for diagnostics / final serialisation reference
         if fold_idx == len(CV_FOLDS):
-            last_models['ridge']      = ridge_bundle
-            last_models['lgbm']       = lgbm_bundle
-            last_models['feat_cols']  = feat_cols
-            last_models['X_val']      = X_val
-            last_models['y_val']      = y_val
+            for name, bundle in fold_bundles.items():
+                last_models[name] = bundle
+            last_models['feat_cols'] = feat_cols
+            last_models['X_val']     = X_val
+            last_models['y_val']     = y_val
 
         # Log summary
+        registered_names = list(get_registry().keys())
         fold_m = {r['model']: r['mae']
                   for r in records
-                  if r['fold'] == fold_idx and r['model'] in ('baseline', 'ridge', 'lgbm')}
+                  if r['fold'] == fold_idx and r['model'] in registered_names}
+        mae_str = '  '.join(
+            f'{n}={fold_m.get(n, float("nan")):.3f}' for n in registered_names
+        )
         log.info(
             f"[cv] {position} fold {fold_idx} ({FOLD_LABELS[fold_idx]}): "
-            f"n_train={len(train_df):,} n_val={len(val_df):,} | "
-            f"MAE  baseline={fold_m.get('baseline', float('nan')):.3f}  "
-            f"ridge={fold_m.get('ridge', float('nan')):.3f}  "
-            f"lgbm={fold_m.get('lgbm', float('nan')):.3f}"
+            f"n_train={len(train_df):,} n_val={len(val_df):,} | MAE  {mae_str}"
         )
 
     metrics_df = pd.DataFrame(records)
@@ -510,27 +535,31 @@ def _record_metrics(
 
 def summarise_cv(metrics_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Mean CV metrics across folds for primary models (baseline, ridge, lgbm).
-    Returns DataFrame indexed by model with mean MAE, RMSE, R², Spearman, TopN.
+    Mean CV metrics across folds for all registered models.
+    Returns DataFrame indexed by model name with mean MAE, RMSE, R², Spearman, TopN.
     """
-    primary = metrics_df[metrics_df['model'].isin(['baseline', 'ridge', 'lgbm'])]
+    model_names = list(get_registry().keys())
+    primary = metrics_df[metrics_df['model'].isin(model_names)]
     return (
         primary
         .groupby('model')[['mae', 'rmse', 'r2', 'spearman', f'top{TOP_N}_prec']]
         .mean()
         .round(4)
-        .reindex(['baseline', 'ridge', 'lgbm'])
+        .reindex(model_names)
     )
 
 
 def beats_baseline(summary: pd.DataFrame) -> dict[str, bool]:
     """
-    Check whether each model beats the baseline on >= 2 of 3 primary metrics
-    (MAE lower, RMSE lower, Spearman higher). project_plan.md §6.5.
+    Check whether each non-baseline model beats the baseline on >= 2 of 3 primary
+    metrics (MAE lower, RMSE lower, Spearman higher). project_plan.md §6.5.
     """
     results = {}
+    if 'baseline' not in summary.index:
+        return results
     bl = summary.loc['baseline']
-    for model in ['ridge', 'lgbm']:
+    non_baseline = [n for n in get_registry() if n != 'baseline']
+    for model in non_baseline:
         if model not in summary.index:
             results[model] = False
             continue
@@ -558,14 +587,14 @@ def plot_calibration(
     Pooled across all CV folds.
     """
     OUTPUTS_MODELS.mkdir(parents=True, exist_ok=True)
-    model_cols = [c for c in ['pred_baseline', 'pred_ridge', 'pred_lgbm']
-                  if c in preds_df.columns]
-    model_labels = {
-        'pred_baseline': 'Baseline',
-        'pred_ridge':    'Ridge',
-        'pred_lgbm':     'LightGBM',
+    _default_colors = ['#888888', '#2196F3', '#E53935', '#4CAF50', '#FF9800', '#9C27B0']
+    registered_names = list(get_registry().keys())
+    model_cols = [f'pred_{n}' for n in registered_names if f'pred_{n}' in preds_df.columns]
+    model_labels = {f'pred_{n}': n.capitalize() for n in registered_names}
+    colors = {
+        f'pred_{n}': _default_colors[i % len(_default_colors)]
+        for i, n in enumerate(registered_names)
     }
-    colors = {'pred_baseline': '#888888', 'pred_ridge': '#2196F3', 'pred_lgbm': '#E53935'}
 
     fig, ax = plt.subplots(figsize=(7, 5))
     y_true = preds_df[TARGET_COL].values
@@ -650,15 +679,20 @@ def plot_metrics_by_fold(
 ) -> None:
     """MAE per fold per model — shows stability across folds."""
     OUTPUTS_MODELS.mkdir(parents=True, exist_ok=True)
-    primary = metrics_df[metrics_df['model'].isin(['baseline', 'ridge', 'lgbm'])]
+    _default_colors = ['#888888', '#2196F3', '#E53935', '#4CAF50', '#FF9800', '#9C27B0']
+    registered_names = list(get_registry().keys())
+    color_map = {
+        n: _default_colors[i % len(_default_colors)]
+        for i, n in enumerate(registered_names)
+    }
+    primary = metrics_df[metrics_df['model'].isin(registered_names)]
     if primary.empty:
         return
 
     fig, ax = plt.subplots(figsize=(7, 4))
-    colors  = {'baseline': '#888888', 'ridge': '#2196F3', 'lgbm': '#E53935'}
     for model_name, grp in primary.groupby('model'):
         ax.plot(grp['fold'], grp['mae'], marker='o',
-                label=model_name, color=colors.get(model_name, 'black'), linewidth=1.8)
+                label=model_name, color=color_map.get(model_name, 'black'), linewidth=1.8)
 
     ax.set_xticks([1, 2, 3])
     ax.set_xticklabels([FOLD_LABELS[i] for i in [1, 2, 3]], fontsize=7)
@@ -700,10 +734,11 @@ def save_cv_results(
         status = 'YES' if beats else 'NO'
         lines.append(f'- {model}: {status}')
 
+    model_names = list(get_registry().keys())
     lines += [
         '\n',
         '## Per-fold metrics (primary models)\n',
-        metrics_df[metrics_df['model'].isin(['baseline', 'ridge', 'lgbm'])].to_markdown(index=False),
+        metrics_df[metrics_df['model'].isin(model_names)].to_markdown(index=False),
     ]
 
     report_path = LOGS_DIR / f'cv_report_{position}.md'

@@ -13,9 +13,17 @@ scipy==1.17.0
 # Machine learning (Phase 5)
 scikit-learn==1.8.0
 lightgbm==4.6.0
+xgboost==3.2.0
+statsmodels==0.14.6
 joblib==1.5.3
 optuna==4.8.0
 shap==0.51.0
+
+# Sequential models (Phase 5, Batch 6 — LSTM/GRU via ml/evaluate_sequential.py)
+torch==2.10.0
+
+# Optional — install manually if using CatBoost model (not registered by default)
+# catboost
 
 # Notebook (required to run eda/eda_report.ipynb)
 jupyter==1.1.1

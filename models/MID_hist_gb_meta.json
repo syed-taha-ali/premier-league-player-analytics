@@ -1,0 +1,42 @@
+{
+  "position": "MID",
+  "model": "hist_gb",
+  "feature_cols": [
+    "was_home",
+    "opponent_season_rank",
+    "team_goals_scored_rolling_3gw",
+    "pts_rolling_3gw",
+    "pts_rolling_5gw",
+    "mins_rolling_3gw",
+    "goals_rolling_5gw",
+    "assists_rolling_5gw",
+    "bonus_rolling_5gw",
+    "xg_rolling_5gw",
+    "xa_rolling_5gw",
+    "xgi_rolling_5gw",
+    "season_pts_per_gw_to_date",
+    "season_starts_rate_to_date",
+    "start_cost",
+    "value_lag1",
+    "transfers_in_lag1",
+    "transfers_out_lag1",
+    "opponent_goals_scored_season",
+    "opponent_cs_rate_season"
+  ],
+  "train_seasons": [
+    7,
+    8,
+    9,
+    10
+  ],
+  "n_train_rows": 19495,
+  "trained_at": "2026-03-17T20:59:41.965403+00:00",
+  "cv_mae_by_fold": [
+    1.8692,
+    1.8177,
+    1.9565
+  ],
+  "cv_mae_mean": 1.8811,
+  "cv_rmse_mean": 2.8174,
+  "cv_spearman_mean": 0.3412
+}

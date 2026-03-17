@@ -1,0 +1,25 @@
+{
+  "position": "GK",
+  "model": "simple_avg",
+  "feature_cols": [
+    "ridge",
+    "xgb",
+    "elasticnet",
+    "lgbm"
+  ],
+  "train_seasons": [
+    8,
+    9,
+    10
+  ],
+  "n_train_rows": 1986,
+  "trained_at": "2026-03-17T21:06:58.889792+00:00",
+  "cv_mae_by_fold": [
+    2.1656,
+    2.1141,
+    2.1676
+  ],
+  "cv_mae_mean": 2.1491,
+  "cv_rmse_mean": 2.7191,
+  "cv_spearman_mean": 0.1081
+}

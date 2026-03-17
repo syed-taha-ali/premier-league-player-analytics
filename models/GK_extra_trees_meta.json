@@ -1,0 +1,42 @@
+{
+  "position": "GK",
+  "model": "extra_trees",
+  "feature_cols": [
+    "was_home",
+    "opponent_season_rank",
+    "team_goals_conceded_season",
+    "team_cs_rolling_3gw",
+    "team_goals_scored_rolling_3gw",
+    "pts_rolling_3gw",
+    "pts_rolling_5gw",
+    "mins_rolling_3gw",
+    "cs_rolling_5gw",
+    "saves_rolling_5gw",
+    "bonus_rolling_5gw",
+    "xgc_rolling_5gw",
+    "season_pts_per_gw_to_date",
+    "season_starts_rate_to_date",
+    "start_cost",
+    "value_lag1",
+    "transfers_in_lag1",
+    "transfers_out_lag1",
+    "opponent_goals_scored_season",
+    "opponent_cs_rate_season"
+  ],
+  "train_seasons": [
+    7,
+    8,
+    9,
+    10
+  ],
+  "n_train_rows": 2731,
+  "trained_at": "2026-03-17T20:59:26.113113+00:00",
+  "cv_mae_by_fold": [
+    2.2586,
+    2.1872,
+    2.234
+  ],
+  "cv_mae_mean": 2.2266,
+  "cv_rmse_mean": 2.7985,
+  "cv_spearman_mean": 0.0925
+}

@@ -116,7 +116,11 @@ WHERE mng_win IS NULL          -- exclude 322 manager rows (2024-25)
 
 ### 4.2 Era strategy — Option A adopted
 
-**Option A — xG era only (seasons 7–10, 2022-23 to 2025-26), ~96,000 rows.**
+**Option A — xG era only (seasons 7–10, 2022-23 to 2025-26).**
+
+Post-filter row counts (after base filter): GK 2,731 | DEF 13,723 | MID 19,495 | FWD 4,951 | total 40,900.
+The ~96,000 figure was pre-filter; the base filter removes ~57% of rows, primarily through the
+`minutes > 0` condition and the in-progress 2025-26 season.
 
 Adopted based on EDA findings:
 1. Pre-xG seasons lack the most predictive attacking features (`xG/xA/xGI/xGC`), which are absent for 60% of historical rows.
@@ -180,7 +184,9 @@ If Option B is pursued in future: mandatory additions are `era_id` flag (1=pre-x
 
 **xG-based (xG era only, seasons 7–10):**
 - `xg_rolling_5gw`, `xa_rolling_5gw` — expected contribution
-- `xgi_rolling_5gw` — combined attacking threat
+- `xgi_rolling_5gw` — combined attacking threat (note: collinear with xg + xa since xgi = xg + xa;
+  Ridge assigns negative coefficients to xgi for MID/FWD as a collinearity artefact — composite
+  prediction is still correct, but dropping xgi from Ridge for MID/FWD is recommended)
 - `xgc_rolling_5gw` — expected goals conceded (DEF/GK)
 
 **Team form:**
@@ -235,19 +241,34 @@ Feature applicability by position:
 
 ## Phase 5 — Modelling
 
+> **Note:** `docs/modelling_plan.md` consolidates the full model inventory, tier assignments,
+> priority-ordered implementation roadmap, registry architecture, batch sequencing, per-model
+> bundle specs, and verification gate outcomes. `docs/modelling_evaluation_report.md` contains
+> all CV results, stratified analyses, and phase implications. The sections below record the
+> core training setup decisions made during implementation.
+
 **Status: Complete.**
 
 **Deliverables:**
-- `ml/evaluate.py` — 3-fold expanding-window CV; metrics, calibration plots, SHAP plots
-- `ml/train.py` — final model training on all xG era data; serialises to `models/`
-- `ml/predict.py` — inference pipeline; per-GW ranked predictions
-- `models/` — 12 serialised model bundles (4 positions × 3 models: baseline, ridge, lgbm)
-- `logs/training/` — CV metrics CSVs, OOF predictions parquets, per-position markdown reports
-- `outputs/models/` — calibration, MAE-by-fold, and SHAP plots (12 PNGs total)
-- `docs/modelling_report.md` — full results report: CV metrics, feature analysis, Phase 7+ implications
+- `ml/models.py` — central model registry (ModelSpec dataclass, build_fn / predict_fn for all 22 models)
+- `ml/evaluate.py` — 3-fold expanding-window CV; Pass 1 (tabular/decomposed), Pass 2 (meta); metrics, calibration plots, SHAP plots
+- `ml/evaluate_sequential.py` — standalone CV pipeline for LSTM / GRU (sequence reshaping, separate from tabular loop)
+- `ml/evaluate_phase6.py` — post-hoc Phase 6 evaluation: minutes bucket, price band, residual plots, learning curves
+- `ml/train.py` — final model training on all xG era data; `--meta` flag for OOF-based meta-model training
+- `ml/predict.py` — inference pipeline; auto-chains base models for meta-model predictions; per-GW ranked output
+- `models/` — 168 serialised artefacts (4 positions × 21 serialised models × .pkl + _meta.json)
+- `logs/training/` — CV metrics CSVs, OOF predictions parquets, per-position markdown reports, sequential CV metrics
+- `outputs/models/` — calibration, MAE-by-fold, SHAP, residuals (per position) and learning curves plots (17 PNGs total)
+- `docs/modelling_evaluation_report.md` — full modelling and evaluation report: all CV results, all stratifications, residual analysis, learning curves, Phase 7+ implications
+- `docs/modelling_plan.md` — model inventory, tier rationale, implementation strategy, batch specs, and verification gate outcomes
 
-**Key result:** Ridge is the production model for all positions (CV MAE: GK 2.132 | DEF 2.138 |
-MID 1.830 | FWD 2.254). All models pass the baseline gate. See `docs/modelling_report.md`.
+**Key results:**
+- **Production model:** Ridge for all positions. CV MAE: GK 2.132 | DEF 2.138 | MID 1.830 | FWD 2.254
+- **Best ensemble:** Blending (ridge + bayesian_ridge + poisson_glm + mlp); beats Ridge on GK and DEF
+- **Uncertainty:** BayesianRidge pred_std available per prediction for dashboard confidence bands
+- **Sequential:** LSTM and GRU beat LightGBM on 3/4 positions but do not beat Ridge; not serialised
+- **Baseline gate:** 17 of 20 models pass across all 4 positions; 3 failures (fdr_mean, lasso, poly_ridge) are documented expected outcomes
+- **Monitoring thresholds (1.5× baseline MAE):** GK 3.494 | DEF 3.498 | MID 2.996 | FWD 3.609
 
 ---
 
@@ -255,146 +276,25 @@ MID 1.830 | FWD 2.254). All models pass the baseline gate. See `docs/modelling_r
 **Architecture:** Four position-specific models — GK, DEF, MID, FWD. Never cross-position.
 **Validation:** Expanding-window temporal CV (train on seasons N…k, test on k+1). Never random split.
 
----
-
-### 5.1 Full Model Brainstorm
-
-Every model type that could plausibly be applied to this dataset, with honest assessment.
-
-#### A — Naive Baselines (always implement — benchmark floor)
-
-| Model | Description | Pros | Cons |
-|-------|-------------|------|------|
-| **Position mean** | Predict mean pts by position × home/away | Zero effort; interpretable | Ignores all player-level signal |
-| **Rolling N-GW mean** | Player's average pts over last 3 or 5 GWs | Captures form; fast | Ignores fixture difficulty |
-| **FDR-adjusted mean** | Rolling mean × opponent difficulty multiplier | Adds fixture context | Still ignores xG, price, team |
-| **Last season avg** | Player's pts/GW from prior season | Reasonable for season openers | Stale after a few GWs |
-
-#### B — Linear Models
-
-| Model | Description | Pros | Cons |
-|-------|-------------|------|------|
-| **OLS Linear Regression** | Standard least-squares | Fully interpretable; fast | Assumes linearity; no regularisation |
-| **Ridge Regression** | OLS + L2 penalty | Handles correlated features well; stable | Still linear |
-| **Lasso Regression** | OLS + L1 penalty | Automatic feature selection | Unstable with correlated features |
-| **ElasticNet** | L1 + L2 combined | Best of Ridge + Lasso | Extra hyperparameter |
-| **Polynomial + Ridge** | Degree-2 feature interactions + Ridge | Cheap non-linearity | Feature explosion; harder to interpret |
-| **Poisson GLM** | GLM with Poisson link (log scale) | Natural for count-like pts distribution | Assumes Poisson variance = mean |
-
-#### C — Tree-Based Models
-
-| Model | Description | Pros | Cons |
-|-------|-------------|------|------|
-| **Decision Tree** | Single CART tree | Fully interpretable; visualisable | High variance; overfits easily |
-| **Random Forest** | Bagging of decision trees | Robust; good OOB estimate; handles NULLs | Slow to train; high memory |
-| **Extra Trees** | Random splits + bagging | Faster than RF; lower variance | Slightly less accurate |
-
-#### D — Gradient Boosting (primary candidates)
-
-| Model | Description | Pros | Cons |
-|-------|-------------|------|------|
-| **XGBoost** | Gradient boosting with regularisation | Excellent performance; native NULL handling; SHAP support | Slower than LightGBM |
-| **LightGBM** | Leaf-wise gradient boosting | Fastest on tabular data; excellent at this scale; SHAP support | Overfits small datasets — not an issue for DEF/MID, but GK Fold 1 has only 745 training rows; use conservative hyperparameters for GK (see §5.3) |
-| **CatBoost** | Gradient boosting with native categorical support | Handles `position`, `team`, `era_id` without encoding | Slower than LightGBM; less common |
-| **HistGradientBoosting** | sklearn's GB with histogram binning | Pure sklearn; no extra dependencies | Less configurable than XGB/LGBM |
-
-#### E — Neural Networks
-
-| Model | Description | Pros | Cons |
-|-------|-------------|------|------|
-| **MLP (Multi-Layer Perceptron)** | Fully-connected feed-forward net | Flexible; learns feature interactions | Needs more tuning; less interpretable |
-| **LSTM** | Recurrent net over GW sequences | Captures sequential GW dependencies natively | Needs fixed-length sequences; slow; more data needed |
-| **GRU** | Lighter variant of LSTM | Faster than LSTM; similar performance | Same sequence-length requirement |
-| **Temporal Fusion Transformer (TFT)** | Attention-based time-series model | State-of-art for multi-horizon TS forecasting; handles static + dynamic features | High complexity; significant engineering overhead |
-| **N-BEATS / N-HiTS** | Neural basis expansion for TS | Strong TS benchmark models | Pure TS — harder to incorporate player-level static features |
-
-#### F — Probabilistic / Bayesian Models
-
-| Model | Description | Pros | Cons |
-|-------|-------------|------|------|
-| **Bayesian Ridge** | Ridge with Bayesian priors | Uncertainty estimates per prediction | Marginal over deterministic Ridge |
-| **Gaussian Process Regression** | Non-parametric Bayesian | Full predictive distribution | O(n³) — infeasible at 242K rows |
-| **Zero-Inflated Poisson** | Poisson with excess-zero component | Models the many-zero scores naturally | Complex; limited library support |
-
-#### G — Decomposed / Component Models
-
-| Model | Description | Pros | Cons |
-|-------|-------------|------|------|
-| **Goals + Assists + CS + Bonus separately** | One model per scoring component → sum to pts | Each component is more predictable; interpretable; position-natural | Covariance between components ignored; 4–5× model count |
-| **Minutes model first** | Predict P(starts), then conditional pts | Directly models rotation risk (huge FPL factor) | Requires calibrated probability output |
-
-#### H — Ensemble / Stacking
-
-| Model | Description | Pros | Cons |
-|-------|-------------|------|------|
-| **Simple Voting / Averaging** | Average predictions of multiple models | Easy; often beats any single model | Need diversity in base models |
-| **Stacking (meta-learner)** | Train meta-model on OOF predictions | Can learn when each base model excels | Leakage risk if CV not done carefully |
-| **Blending** | Average on a held-out set | Simpler than stacking | Wastes a holdout split |
-
-#### I — Time-Series Specific (not recommended)
-
-| Model | Reason not recommended |
-|-------|----------------------|
-| **ARIMA / SARIMA** | Max 38 GWs per player per season — too few points for reliable ARIMA fitting |
-| **Prophet** | Designed for daily/weekly data with trend + seasonality — FPL has neither |
-| **Exponential Smoothing (ETS)** | Better than ARIMA but same data-length problem |
+The full model brainstorm, tier assignments, priority rationale, and batch-by-batch implementation
+record are in `docs/modelling_plan.md`. The CV results, feature analysis, and all phase
+implications are in `docs/modelling_evaluation_report.md`. The sections below record the core training
+setup decisions made during implementation.
 
 ---
 
-### 5.2 Tiered Implementation Recommendations
-
-#### Tier 1 — Implement First (highest ROI, low effort)
-
-These should be built before any other model. They establish the benchmark and are the
-most likely to be the final production models.
-
-| Model | Rationale |
-|-------|-----------|
-| **Rolling mean baseline** | Zero-effort benchmark; any model that doesn't beat this is useless |
-| **Ridge Regression** | Fast, interpretable, good at quantifying linear feature effects; essential before going non-linear |
-| **LightGBM** | Best expected performance/effort ratio on tabular FPL data; native NULL handling; fast hyperparameter search; SHAP explainability |
-
-#### Tier 2 — Implement After Tier 1 (meaningful additional value)
-
-Build these once Tier 1 is working and evaluated. Each adds a distinct perspective.
-
-| Model | Rationale |
-|-------|-----------|
-| **XGBoost** | Close competitor to LightGBM; different regularisation; worth comparing directly |
-| **Random Forest** | Different inductive bias from boosting; often catches different patterns |
-| **Decomposed model (minutes → pts)** | Directly models the biggest FPL risk (rotation/injury); architecturally novel |
-| **MLP** | Neural baseline; validates whether deep learning adds value over boosting |
-
-#### Tier 3 — Experimental (high effort, uncertain marginal gain)
-
-Only pursue after Tier 1+2 are solid and evaluated.
-
-| Model | Rationale |
-|-------|-----------|
-| **LSTM / GRU** | Worth testing if EDA shows strong sequential GW dependencies that rolling features don't capture |
-| **Temporal Fusion Transformer** | State-of-art TS model; justified only if LSTM shows strong improvement over LightGBM |
-| **Stacking ensemble** | Blends Tier 1+2 models; typically adds 1–3% MAE improvement if base models are diverse |
-| **Decomposed component models (goals/assists/CS separately)** | High interpretability payoff; test if position-specific pts breakdown reveals better signal |
-
-#### Not recommended for this dataset
-
-| Model | Reason |
-|-------|--------|
-| ARIMA/SARIMA/Prophet | Too few per-player GWs; not designed for cross-sectional player panels |
-| Gaussian Process | O(n³) — infeasible at scale |
-| Zero-Inflated Poisson | Marginal over simpler approaches; complex implementation |
-
----
-
-### 5.3 Training setup
+### 5.1 Training Setup
 
 **File structure:**
 ```
 ml/
-├── features.py          # build_feature_matrix(position, era)
-├── train.py             # train and serialise models
-├── evaluate.py          # CV evaluation + metrics
-└── predict.py           # inference on new GW fixture list
+├── features.py              # build_feature_matrix(position, era)
+├── models.py                # central registry: ModelSpec, all build_fn/predict_fn
+├── train.py                 # train and serialise models [--meta]
+├── evaluate.py              # CV evaluation + metrics + calibration/SHAP plots
+├── evaluate_sequential.py   # LSTM/GRU CV (separate pipeline)
+├── evaluate_phase6.py       # post-hoc: minutes bucket, price band, residuals, learning curves
+└── predict.py               # inference on new GW fixture list
 models/
 └── {position}_{model}.pkl
 ```
@@ -403,8 +303,8 @@ models/
 of each player-season) and ~2.8% NaN in team/opponent features (first fixture of each
 team-season). LightGBM handles NaN natively — no action needed. Ridge requires imputation
 before `fit()`; use mean imputation computed within the training fold only, stratified by
-`(position, season_id)` to avoid contaminating early-season rows with mid-season averages.
-Never fit the imputer on the full dataset or on the validation fold.
+`season_id`. Global fallback means are also stored in the bundle for inference on unseen
+seasons. Never fit the imputer on the full dataset or on the validation fold.
 
 **Feature scaling:** Ridge requires standardisation; LightGBM does not. Fit a
 `StandardScaler` on the training fold only and apply the same fitted scaler to the
@@ -424,6 +324,11 @@ These are starting points for hyperparameter search, not fixed values.
 **Hyperparameter tuning:** Optuna (Bayesian search) or sklearn GridSearchCV within each
 CV fold. Tune on validation fold; do not touch test fold.
 
+**Meta-model training:** Meta-models (simple_avg, stacking, blending) cannot be trained on a
+single full-data pass — they require out-of-fold base model predictions. Run `ml/evaluate.py`
+first to generate `logs/training/cv_preds_{pos}.parquet`, then use `ml/train.py --meta` to
+fit meta-learners on the full 3-fold OOF stack.
+
 **Reproducibility:** Set `random_state=42` everywhere; log all hyperparameters to
 `logs/training/`.
 
@@ -431,8 +336,9 @@ CV fold. Tune on validation fold; do not touch test fold.
 
 ## Phase 6 — Evaluation
 
-**Status: Complete** (integrated into the Phase 5 CV pipeline via `ml/evaluate.py`).
-All §6.1–6.5 requirements are implemented. See `docs/modelling_report.md` for full results.
+**Status: Complete.**
+See `docs/modelling_evaluation_report.md` for full CV results, all stratifications, residual
+analysis, learning curves, and the Phase 6 completion checklist.
 
 ### 6.1 Validation framework
 - **Method:** Expanding-window temporal CV — train on seasons 1…k, validate on k+1.
@@ -452,38 +358,74 @@ All §6.1–6.5 requirements are implemented. See `docs/modelling_report.md` for
 | **Spearman ρ** (rank correlation) | — | FPL is about ranking players, not absolute accuracy |
 | **Top-N precision** | % | What % of predicted top-N scorers actually score top-N? |
 
+**Metric interpretation (confirmed by Phase 5/6 CV):**
+- **R² near zero or negative is expected** — GW-level FPL points are inherently noisy; a player
+  can blank due to rotation or bad luck regardless of predicted form. Predicting the mean well
+  (low MAE) is more valuable than explaining haul variance. Positive R² was achieved on DEF
+  (0.048), MID (0.106), and FWD (0.087) with Ridge.
+- **Spearman ρ of 0.3–0.4 is competitive** — consistent with published FPL prediction benchmarks
+  where the best public tools reach approximately 0.35–0.45 on held-out GWs without injury data.
+  GK (0.118) is structurally lower because GK scoring is largely binary (CS or no CS).
+- **Top-10 precision of 0.15–0.22 for DEF/MID is meaningful** — a "top-10 DEF" in a given GW
+  is usually determined by clean sheets and bonus, which are near-random at the individual level.
+  GK (0.54) and FWD (0.45) show higher precision because of smaller pools and stronger form
+  concentration among elite players.
+
 ### 6.3 Stratified evaluation
-All metrics computed separately for:
-- Position (GK / DEF / MID / FWD)
-- Home vs away — EDA-confirmed effects large enough to distort aggregate metrics if not disaggregated
-- Minutes bucket: starter (60+ mins), rotation (30–59), cameo (<30)
-- Opponent tier: top-6 vs rest — EDA-confirmed −17% to −34% penalty by position
-- Price band (£5m brackets)
+Metrics computed separately for:
+- **Position (GK / DEF / MID / FWD)** — all models trained and evaluated position-specifically.
+- **Home vs away** — implemented. Away games are systematically easier to predict (lower MAE across
+  all positions). Home-game hauls have higher variance that the model underestimates. Exception:
+  FWD Spearman is higher for home games (0.444 vs 0.387), as elite FWDs dominate home rankings.
+  Ridge home vs away MAE: GK 2.248 / 2.016, DEF 2.273 / 2.005, MID 1.963 / 1.695, FWD 2.430 / 2.078.
+- **Opponent tier: top-6 vs rest** — implemented. vs-top-6 MAE is consistently lower than vs-rest
+  (Ridge GK: 1.837 vs 2.258, DEF: 1.745 vs 2.308, MID: 1.519 vs 1.961, FWD: 1.839 vs 2.436).
+  This is a statistical artefact: top-6 fixtures compress scores to 1–2 pts, making low predictions
+  easy to validate. Spearman is also lower vs top-6 because ranking is harder when players cluster
+  at the same score.
+- **Minutes bucket** — implemented (`ml/evaluate_phase6.py`). Cameos (<30 min) have lowest absolute
+  MAE but near-zero Spearman; starters (60+) have highest MAE and the most useful rank signal.
+- **Price band** — implemented (`ml/evaluate_phase6.py`). MAE increases with price; Spearman
+  declines with price (Budget > Mid > Premium > Elite across DEF, MID, FWD).
 
 ### 6.4 Calibration & diagnostics
-- **Calibration plot:** predicted vs actual mean pts in 10 equal-width bins — check for
-  systematic over/under-prediction
-- **Residual analysis:** residuals vs predicted, vs GW, vs opponent rank — identify
-  structural blind spots
-- **SHAP summary plots:** feature importance for LightGBM/XGBoost models per position
-- **Learning curves:** training MAE vs validation MAE as training data grows — diagnose
-  over/underfitting
+- **Calibration plots** — implemented; `outputs/models/calibration_{pos}.png`
+- **MAE-by-fold plots** — implemented; `outputs/models/mae_by_fold_{pos}.png`
+- **SHAP summary plots** — implemented; `outputs/models/shap_{pos}.png` (LightGBM, fold 3)
+- **Residual analysis** — implemented (`ml/evaluate_phase6.py`); `outputs/models/residuals_{pos}.png`.
+  Consistent mild positive heteroscedasticity (ρ = 0.33–0.55) across all positions. Model
+  over-predicts against top-5 opponents across all positions.
+- **Learning curves** — implemented (`ml/evaluate_phase6.py`); `outputs/models/learning_curves.png`.
+  Ridge–LightGBM gap narrows from fold 1 to fold 3 on DEF/MID/FWD, suggesting Optuna tuning
+  will close it further.
 
 ### 6.5 Benchmark comparison table
-Every model evaluated against the rolling-mean baseline. Report: MAE, RMSE, Spearman ρ,
-top-10 precision. A model must beat the baseline on at least 2 of 3 primary metrics to
-be considered for production.
+Every model evaluated against the rolling-mean baseline. A model must beat the baseline on
+at least 2 of 3 primary metrics (MAE, RMSE, Spearman ρ) to be considered for production.
+Full results are in `docs/modelling_evaluation_report.md`. Summary of key results:
+
+| Position | Baseline MAE | Ridge MAE | Best model MAE | Best model |
+|----------|------------:|----------:|---------------:|------------|
+| GK | 2.329 | 2.132 | 2.098 | minutes_model |
+| DEF | 2.332 | 2.138 | 1.994 | component_model |
+| MID | 1.997 | 1.830 | 1.822 | poisson_glm |
+| FWD | 2.406 | 2.254 | 2.155 | component_model |
+
+**Gate pass rate:** 17 of 20 models pass across all 4 positions. The 3 consistent failures
+(fdr_mean, lasso, poly_ridge) have documented structural limitations. All 8 original Tier 1
+models (Ridge and LightGBM, all 4 positions) pass.
 
 ### 6.6 Known limitations to document
 
 | Limitation | Quantified impact | Mitigation status |
 |------------|:-----------------:|-------------------|
-| MID sub-role heterogeneity | CV = 0.932 within MID vs 0.490 for FWD | Partially mitigated by xGI rolling features; residual variance is structural |
-| Survivorship bias | 75% of data from 30+ GW starters | Acknowledge degraded performance for rotation and fringe players in evaluation |
-| Cold-start players (no prior-season history) | 39.4% of players appear only 1 season | Fall back to `start_cost` + position priors; rolling features unavailable until GW 3+ |
+| No injury or team-news data | Largest predictive gap; all models assume player availability | Unaddressable from current sources; document in dashboard |
+| MID sub-role heterogeneity | CV R² = 0.106 (positive but low); structural residual from striker-vs-creator mixing | Partially mitigated by xGI rolling features; residual is structural |
+| Survivorship bias | 75% of data from 30+ GW starters | Less reliable for rotation/fringe players; warn users in dashboard |
+| Cold-start players (no prior-season history) | 39.4% of players appear only 1 season; rolling features unavailable at GW1 | Fall back to `start_cost` + position priors; `last_season_avg` handles GW1 specifically |
 | Team quality confounding (DEF/GK) | 46.6% variance in DEF/GK pts explained by team goals conceded alone | Mitigated by `team_goals_conceded_season`; residual individual-skill signal remains weak |
-| No injury or team-news data | Largest unaddressable predictive gap | Document as primary model limitation; not fixable from this dataset |
-| 2019-20 COVID GW gap | GW 29 → 39 discontinuity in season_id = 4 | Enforce rolling boundary rule: no cross-gap feature chaining |
+| Partial 2025-26 season in fold 3 | Fold 3 DEF baseline MAE +0.28 vs fold 2; Ridge degrades +0.09 | Expected; partial-season feature vectors behave differently from end-of-season rows |
+| xG era constraint (seasons 7–10 only) | ~57% of available rows excluded by base filter; 40,900 rows remain | Justified by era incompatibility; Option B deferred — see §4.2 |
 
 ---
 
@@ -491,12 +433,28 @@ be considered for production.
 
 ### 7.1 Architecture
 - **Framework:** Streamlit (lower barrier; faster to iterate) or Plotly Dash (more
-  control for production). Decide after Phase 6.
+  control for production). Decide at Phase 7 kickoff.
 - **Static charts:** matplotlib / seaborn exported to `outputs/eda/`
 - **Serving:** local (`streamlit run app.py`); no cloud deployment in initial phase
 - **Output directory:** `outputs/dashboards/`
 
-### 7.2 Dashboard pages / sections
+### 7.2 Model selection for dashboard
+
+All 21 serialised models are available via `ml/predict.py`. The following are
+recommended for the dashboard based on Phase 5/6 CV results:
+
+| Role | Model | Rationale |
+|------|-------|-----------|
+| Default production | `ridge` | Best MAE and Spearman on all positions at default settings; sub-second inference; fully interpretable |
+| Uncertainty bands | `bayesian_ridge` | Produces `pred_std` per prediction; near-identical point estimates to Ridge; enables "predicted pts ± uncertainty" display |
+| Ensemble view | `blending` | Best ensemble model; beats Ridge on GK (2.123 vs 2.132) and DEF (2.121 vs 2.138); deps: ridge, bayesian_ridge, poisson_glm, mlp |
+| Component scouting | `component_model` | Best MAE on DEF (1.994) and FWD (2.155); sub-predictions (goals, assists, CS, bonus) surfaceable for player breakdown UI |
+| Rotation risk | `minutes_model` | Produces P(starts) intermediate; best GK MAE (2.098); P(starts) column is a direct rotation-risk signal |
+
+Dashboard should default to Ridge but expose model selection. The model selector can offer at
+minimum: Ridge, Bayesian Ridge, Blending, and an optional "all models" comparison view.
+
+### 7.3 Dashboard pages / sections
 
 #### Page 1 — Data Explorer (EDA insights)
 - Season selector, position filter, era toggle
@@ -512,60 +470,96 @@ be considered for production.
 - Price vs performance scatter (start_cost vs season_total_points)
 
 #### Page 3 — Model Performance
-- Model comparison table: MAE / RMSE / Spearman ρ per model × position
-- Calibration plots: predicted vs actual (4 position subplots)
-- Feature importance (SHAP bar chart, per position, per model)
-- Residual plot: residuals vs GW, coloured by position
+- **Data source:** `logs/training/cv_metrics_{pos}.csv` (21 models × 3 folds × 5 metrics, all positions)
+- Model comparison table: MAE / RMSE / Spearman ρ / Top-10 precision per model × position
+- **Calibration plots:** pre-rendered at `outputs/models/calibration_{pos}.png` — embed directly
+- **MAE-by-fold plots:** pre-rendered at `outputs/models/mae_by_fold_{pos}.png` — stability view
+- **SHAP feature importance:** pre-rendered at `outputs/models/shap_{pos}.png` (LightGBM, fold 3)
+- Residual plot: OOF residuals from `logs/training/cv_preds_{pos}.parquet` vs GW, coloured by position
 
 #### Page 4 — GW Predictions
-- Fixture list input for next GW
-- Ranked player predictions table: player, position, team, opponent, predicted pts,
-  uncertainty band (if probabilistic model)
-- Filter by position, price band, ownership %
-- Download as CSV button
+- **Data source:** `ml/predict.py` → `predict_gw(gw, season_id, models=(...))` returns ranked DataFrame
+- Model selector (default: ridge; options: bayesian_ridge, blending, ridge, and others)
+- Ranked player predictions table: player, position, team, opponent, predicted pts
+- **Uncertainty column:** when bayesian_ridge selected, show "predicted pts ± pred_std"
+- **Rotation risk column:** when minutes_model selected or alongside ridge, show P(starts) %
+- **Component breakdown:** when component_model selected, show goals/assists/CS/bonus sub-predictions
+- Filter by position, price band, top-N per position
+- Download as CSV button; output path: `outputs/predictions/gw{N}_s{season}_predictions.csv`
 
-### 7.3 Static report charts (always export)
+#### Page 5 — Player Scouting (optional extension)
+- Component model sub-predictions: expected goals, assists, CS probability, bonus per player
+- Rotation risk table: P(starts) from minutes_model, sorted by risk level
+- Price vs predicted pts scatter per position (value pick identification)
+
+### 7.4 Static report charts (always export)
 - `outputs/eda/points_distribution.png`
 - `outputs/eda/home_away_effect.png`
 - `outputs/eda/team_strength_heatmap.png`
 - `outputs/models/calibration_{position}.png`
-- `outputs/models/shap_importance_{position}.png`
+- `outputs/models/mae_by_fold_{position}.png`
+- `outputs/models/shap_{position}.png`
+
+### 7.5 Sequential model integration (deferred)
+
+LSTM and GRU are not serialised and cannot be called from `ml/predict.py`. If sequential
+predictions are desired in the dashboard, run `ml/evaluate_sequential.py` once per GW to
+generate a prediction CSV, then load it alongside the tabular predictions. A full
+`torch.save` serialisation path can be added to `evaluate_sequential.py` if justified.
 
 ---
 
 ## Phase 8 — Deployment
 
-### 8.1 Model serialisation
-- Serialise all production models with `joblib`: `models/{position}_{model}.pkl`
-- Alongside each model, save: feature list, scaler (if used), training metadata
-  (season range, n_rows, CV MAE) as `models/{position}_{model}_meta.json`
-- Version models by season: `models/v{season_id}/` — never overwrite prior season models
+### 8.1 Pre-deployment steps (before freezing production model)
 
-### 8.2 Prediction pipeline
+These steps are recommended before finalising the deployment build, based on Phase 5/6 findings:
+
+1. **Run Optuna tuning for LightGBM:** `python -m ml.train --tune` (40 trials, TPE sampler on
+   fold 3). FWD is the highest priority — it has the widest LightGBM–Ridge gap and the most
+   to gain from tuning. Expected to close the gap materially but not definitively.
+
+2. **Alpha search for Ridge:** Fit Ridge with `alpha in [0.1, 0.5, 1.0, 5.0, 10.0]` within
+   the existing 3-fold CV framework. Expected MAE improvement: 0.02–0.05 pts. Low effort.
+
+3. **Drop `xgi_rolling_5gw` from Ridge feature set for MID and FWD:** The xG feature cluster
+   (`xg`, `xa`, `xgi`) is collinear and causes Ridge to assign a negative coefficient to `xgi`.
+   The composite prediction is correct, but dropping `xgi` from Ridge (while retaining it for
+   LightGBM which handles collinearity naturally) may give a cleaner linear model.
+
+### 8.2 Model serialisation
+- All 168 artefacts already serialised to `models/` — see Phase 5 deliverables
+- Format: `models/{position}_{model}.pkl` (bundle) + `models/{position}_{model}_meta.json`
+- Version models by season: `models/v{season_id}/` — never overwrite prior season models
+- **Default production model:** `ridge` for all positions. Imputer state (`season_means`,
+  `global_means`) is serialised in the bundle. For inference on an unseen season (e.g. season 11
+  GW1), the model falls back to `global_means` automatically — no code change required.
+
+### 8.3 Prediction pipeline
 **Entry point:** `ml/predict.py`
 
 **Inputs:**
 - Next GW number and season
-- Fixture list: `[(home_team, away_team), …]`
-- Optional: current player prices and ownership (from FPL API or manual CSV)
+- Optional: specific model name(s) — defaults to `ridge`
 
 **Process:**
-1. Query `db/fpl.db` for all eligible players (minutes > 0, mng_win IS NULL)
-2. Build feature matrix for next GW using `features.py` (rolling stats to date)
-3. Attach fixture context: `was_home`, `opponent_season_rank`
-4. Load serialised model for each position
-5. Generate predictions; combine into single ranked DataFrame
+1. Call `build_feature_matrix(position)` — queries `db/fpl.db`, applies base filter and rolling features
+2. Filter to target GW rows
+3. Load serialised bundle via `load_model(position, model_name)`
+4. Call `spec.predict_fn(bundle, X, ...)` — meta-models auto-chain their base models
+5. Combine all positions into a single ranked DataFrame
 
 **Output:**
-- `outputs/predictions/gw{N}_predictions.csv` — columns: player, position, team,
-  opponent, predicted_pts, model
+- `outputs/predictions/gw{N}_s{season}_predictions.csv` — player, position, team, gw, season_id,
+  total_points (actual, if available), pred_{model}, pred_ensemble (if multiple models)
 - Console summary: top-5 predicted per position
 
-### 8.3 Retraining cadence
+### 8.4 Retraining cadence
 - **End of season:** Retrain all models with new season appended to training data.
-  Run full CV on new fold (new season as held-out test).
+  Run full CV on new fold (new season as held-out test). Retrain meta-models from updated
+  OOF parquets: `python -m ml.train --all`.
 - **Mid-season trigger:** If rolling MAE (last 5 GWs) exceeds 1.5× baseline MAE,
-  flag for review. Retrain if confirmed performance degradation.
+  flag for review. Retrain if confirmed performance degradation. See Phase 9 for thresholds.
 
 ---
 
@@ -573,14 +567,25 @@ be considered for production.
 
 ### 9.1 Per-GW performance tracking
 After each GW result is published:
-1. Join `gw{N}_predictions.csv` against actual `fact_gw_player` results for that GW
+1. Join `gw{N}_s{season}_predictions.csv` against actual `fact_gw_player` results for that GW
 2. Compute: MAE, RMSE, Spearman ρ, top-10 precision for that GW
 3. Append to `logs/monitoring/monitoring_log.csv`
 
-### 9.2 Rolling metrics
-- Compute 5-GW rolling MAE per position per model
-- Compare against baseline (rolling mean) rolling MAE
-- Flag if model MAE > 1.5× baseline for any position over 5 consecutive GWs
+### 9.2 Rolling metrics and alert thresholds
+
+Compute 5-GW rolling MAE per position per model. Thresholds are 1.5× the CV baseline MAE
+(rolling-mean baseline, averaged across 3 folds), seeded from Phase 5/6 results:
+
+| Position | Baseline MAE (CV mean) | Alert threshold (1.5×) |
+|----------|----------------------:|----------------------:|
+| GK | 2.329 | 3.494 |
+| DEF | 2.332 | 3.498 |
+| MID | 1.997 | 2.996 |
+| FWD | 2.406 | 3.609 |
+
+Seed these values into `logs/monitoring/monitoring_log.csv` at Phase 9 initialisation.
+Flag and review if any model's 5-GW rolling MAE exceeds the threshold for its position.
+Trigger retraining if confirmed performance degradation (not a one-GW spike).
 
 ### 9.3 Schema change alerting
 FPL has added new column groups each season (xG in 2022-23, manager mode in 2024-25,
@@ -590,7 +595,7 @@ defensive stats in 2025-26). Before each season's data is loaded:
 - Update `etl/schema.py`, `ml/features.py`, and `project_plan.md` accordingly
 
 ### 9.4 Output
-- `logs/monitoring/monitoring_log.csv` — per-GW metrics
+- `logs/monitoring/monitoring_log.csv` — per-GW metrics with alert threshold columns
 - `logs/monitoring/gw{N}_eval.md` — narrative summary each GW
 
 ---

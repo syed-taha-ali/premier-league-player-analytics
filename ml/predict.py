@@ -5,11 +5,17 @@ Loads the trained model artefacts from models/ and the current feature matrix
 from outputs/features/, then produces a ranked prediction table for the
 most recent available GW (or a specified GW).
 
+All 22 registered models are available (tabular, decomposed, and meta families).
+Sequential models (lstm, gru) are excluded — use ml/evaluate_sequential.py for those.
+Meta-models (simple_avg, stacking, blending) automatically load and run their
+base models before combining predictions.
+
 Usage:
-    python -m ml.predict                       # predict latest GW, all models
-    python -m ml.predict --gw 25 --season 10   # specify GW and season
-    python -m ml.predict --model lgbm          # single model
-    python -m ml.predict --top 20              # show top-20 per position
+    python -m ml.predict                          # predict latest GW using lgbm
+    python -m ml.predict --gw 25 --season 10      # specify GW and season
+    python -m ml.predict --model ridge            # single model
+    python -m ml.predict --models ridge xgb lgbm  # ensemble of named models
+    python -m ml.predict --top 20                 # show top-20 per position
 
 Outputs:
     outputs/predictions/gw{N}_s{season}_predictions.csv
@@ -27,7 +33,8 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
 from ml.features import build_feature_matrix, CONTEXT_COLS, TARGET_COL, VALID_POSITIONS
-from ml.evaluate import get_feature_cols, stratified_impute
+from ml.evaluate import get_feature_cols
+from ml.models import get_registry, get_model
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,7 +47,6 @@ _HERE        = Path(__file__).parent.parent
 MODELS_DIR   = _HERE / 'models'
 OUTPUTS_PRED = _HERE / 'outputs' / 'predictions'
 
-VALID_MODELS = ('baseline', 'ridge', 'lgbm')
 
 
 # ---------------------------------------------------------------------------
@@ -61,54 +67,8 @@ def load_model(position: str, model_name: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Inference helpers
+# Inference
 # ---------------------------------------------------------------------------
-
-def _predict_baseline(bundle: dict, X: pd.DataFrame) -> np.ndarray:
-    """Use pts_rolling_5gw; NaN filled with stored fallback mean."""
-    fallback = bundle.get('fallback_mean', 1.0)
-    return X['pts_rolling_5gw'].fillna(fallback).values
-
-
-def _predict_ridge(bundle: dict, X: pd.DataFrame, season_ids: pd.Series) -> np.ndarray:
-    """Impute with stored season/global means, scale, and predict."""
-    feat_cols    = bundle['feature_cols']
-    season_means = bundle['season_means']       # DataFrame, index=season_id
-    global_means = bundle['global_means']       # Series, index=feat_cols
-    scaler       = bundle['scaler']             # fitted StandardScaler
-    model        = bundle['model']
-
-    X_aligned = X[feat_cols].reset_index(drop=True)
-    sids      = season_ids.reset_index(drop=True)
-
-    # Impute using stored training statistics (never refit at inference)
-    X_arr  = X_aligned.values.astype(float)
-    s_vals = sids.values
-    fill   = np.empty_like(X_arr)
-    gm     = global_means[feat_cols].values
-
-    for i, s in enumerate(s_vals):
-        if s in season_means.index:
-            fill[i] = season_means.loc[s, feat_cols].values
-        else:
-            fill[i] = gm
-
-    nan_mask = np.isnan(X_arr)
-    fill     = np.where(np.isnan(fill), gm, fill)
-    X_filled = np.where(nan_mask, fill, X_arr)
-    # Final fallback
-    X_filled = np.where(np.isnan(X_filled), gm, X_filled)
-
-    X_scaled = scaler.transform(X_filled)
-    return model.predict(X_scaled)
-
-
-def _predict_lgbm(bundle: dict, X: pd.DataFrame) -> np.ndarray:
-    """LightGBM inference; native NaN handling, no imputation needed."""
-    feat_cols = bundle['feature_cols']
-    model     = bundle['model']
-    return model.predict(X[feat_cols])
-
 
 def predict_position(
     position: str,
@@ -121,26 +81,37 @@ def predict_position(
     Parameters
     ----------
     position    : one of VALID_POSITIONS
-    model_name  : one of VALID_MODELS
+    model_name  : registered model name (see ml.models.get_registry())
     df_predict  : feature matrix rows to predict (from build_feature_matrix)
 
     Returns
     -------
     pd.Series of predicted points, aligned to df_predict index.
     """
-    bundle    = load_model(position, model_name)
-    feat_cols = get_feature_cols(df_predict)
-    X         = df_predict[feat_cols]
+    spec       = get_model(model_name)
+    bundle     = load_model(position, model_name)
+    feat_cols  = get_feature_cols(df_predict)
+    X          = df_predict[feat_cols]
     season_ids = df_predict['season_id']
 
-    if model_name == 'baseline':
-        preds = _predict_baseline(bundle, X)
-    elif model_name == 'ridge':
-        preds = _predict_ridge(bundle, X, season_ids)
-    elif model_name == 'lgbm':
-        preds = _predict_lgbm(bundle, X)
+    if spec.family == 'meta':
+        # Run each base model first, then feed predictions into the meta predict_fn
+        dep_preds: dict[str, np.ndarray] = {}
+        for dep in spec.deps:
+            try:
+                dep_bundle = load_model(position, dep)
+                dep_spec   = get_model(dep)
+                dep_preds[dep] = dep_spec.predict_fn(
+                    dep_bundle, X, sid=season_ids, _df=df_predict
+                )
+            except FileNotFoundError:
+                log.warning(f'[predict] Base model {dep} not found for meta-model {model_name}')
+                dep_preds[dep] = np.full(len(X), np.nan)
+        preds = spec.predict_fn(
+            bundle, X, sid=season_ids, _dep_preds=dep_preds, _df=df_predict
+        )
     else:
-        raise ValueError(f'Unknown model: {model_name}')
+        preds = spec.predict_fn(bundle, X, sid=season_ids, _df=df_predict)
 
     return pd.Series(preds, index=df_predict.index, name=f'pred_{model_name}')
 
@@ -282,20 +253,13 @@ def evaluate_predictions(
             log.error(str(e))
             continue
 
+        spec = get_model(model_name)
         for gw in sorted(df_season['gw'].unique()):
             df_gw = df_season[df_season['gw'] == gw].copy().reset_index(drop=True)
             try:
                 feat_cols  = get_feature_cols(df_gw)
                 X          = df_gw[feat_cols]
-                season_ids = df_gw['season_id']
-                if model_name == 'baseline':
-                    preds = _predict_baseline(bundle, X)
-                elif model_name == 'ridge':
-                    preds = _predict_ridge(bundle, X, season_ids)
-                elif model_name == 'lgbm':
-                    preds = _predict_lgbm(bundle, X)
-                else:
-                    continue
+                preds      = spec.predict_fn(bundle, X, sid=df_gw['season_id'])
             except Exception:
                 continue
             actuals = df_gw['total_points'].values
@@ -325,9 +289,9 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description='FPL GW prediction inference')
     p.add_argument('--gw',     type=int, help='Gameweek number to predict')
     p.add_argument('--season', type=int, help='Season ID (e.g. 10 = 2025-26)')
-    p.add_argument('--model',  choices=list(VALID_MODELS),
+    p.add_argument('--model',  choices=sorted(get_registry()),
                    help='Model to use (default: lgbm). Pass multiple via repeated flag.')
-    p.add_argument('--models', nargs='+', choices=list(VALID_MODELS),
+    p.add_argument('--models', nargs='+', choices=sorted(get_registry()),
                    help='One or more models (overrides --model)')
     p.add_argument('--top',    type=int, default=5, help='Top-N to print per position')
     p.add_argument('--eval',   type=int, metavar='SEASON_ID',

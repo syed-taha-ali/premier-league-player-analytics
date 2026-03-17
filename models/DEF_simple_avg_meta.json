@@ -1,0 +1,25 @@
+{
+  "position": "DEF",
+  "model": "simple_avg",
+  "feature_cols": [
+    "ridge",
+    "xgb",
+    "elasticnet",
+    "lgbm"
+  ],
+  "train_seasons": [
+    8,
+    9,
+    10
+  ],
+  "n_train_rows": 9990,
+  "trained_at": "2026-03-17T21:06:58.909820+00:00",
+  "cv_mae_by_fold": [
+    2.2435,
+    2.0621,
+    2.2482
+  ],
+  "cv_mae_mean": 2.1846,
+  "cv_rmse_mean": 2.9111,
+  "cv_spearman_mean": 0.2473
+}

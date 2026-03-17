@@ -5,10 +5,15 @@ After CV evaluation (ml/evaluate.py) confirms model quality, this script
 trains each model on ALL available xG era data and serialises artefacts to
 models/{position}_{model}.pkl and models/{position}_{model}_meta.json.
 
-Models trained per position: baseline, ridge, lgbm.
+Tabular / decomposed models are trained on the full feature matrix.
+Meta-models (simple_avg, stacking, blending) are trained on the OOF
+predictions from logs/training/cv_preds_{position}.parquet, which must
+already exist (run ml.evaluate first).
 
 Usage:
-    python -m ml.train                         # train all positions and models
+    python -m ml.train                         # train all tabular+decomposed models
+    python -m ml.train --meta                  # train meta-models from OOF parquets
+    python -m ml.train --all                   # train everything (tabular + meta)
     python -m ml.train --position DEF          # single position
     python -m ml.train --position DEF --model lgbm   # single model
     python -m ml.train --eval-first            # run CV before training
@@ -29,15 +34,12 @@ import pandas as pd
 from ml.features import build_feature_matrix, VALID_POSITIONS
 from ml.evaluate import (
     get_feature_cols,
-    stratified_impute,
-    build_ridge,
-    build_lgbm,
     run_cv,
     summarise_cv,
     beats_baseline,
-    LGBM_BASE_PARAMS,
     LOGS_DIR,
 )
+from ml.models import get_registry, get_model, tabular_models, meta_models
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,91 +48,56 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-_HERE    = Path(__file__).parent.parent
+_HERE      = Path(__file__).parent.parent
 MODELS_DIR = _HERE / 'models'
-VALID_MODELS = ('baseline', 'ridge', 'lgbm')
 
 
 # ---------------------------------------------------------------------------
-# Model training on full dataset
+# Generic tabular model trainer
 # ---------------------------------------------------------------------------
 
-def train_baseline(
-    df: pd.DataFrame,
-    feat_cols: list[str],
-    position: str,
-    cv_metrics: pd.DataFrame | None = None,
-) -> None:
-    """
-    Baseline 'model': just stores the training mean of pts_rolling_5gw as fallback.
-    At inference, predict = pts_rolling_5gw; NaN -> stored mean.
-    """
-    fallback_mean = float(df['total_points'].mean())
-    bundle = {
-        'model_name':    'baseline',
-        'position':      position,
-        'feature_cols':  feat_cols,
-        'fallback_mean': fallback_mean,
-    }
-    _save(position, 'baseline', bundle, df, cv_metrics)
-
-
-def train_ridge(
-    df: pd.DataFrame,
-    feat_cols: list[str],
-    position: str,
-    cv_metrics: pd.DataFrame | None = None,
-    alpha: float = 1.0,
-) -> None:
-    """
-    Train Ridge on all xG era data. Imputation fit on full training set.
-    """
-    X = df[feat_cols]
-    y = df['total_points']
-    s = df['season_id']
-
-    bundle = build_ridge(X, y, s, alpha=alpha)
-    bundle['model_name'] = 'ridge'
-    bundle['position']   = position
-
-    _save(position, 'ridge', bundle, df, cv_metrics)
-
-
-def train_lgbm(
+def _train_tabular(
+    spec,
     df: pd.DataFrame,
     feat_cols: list[str],
     position: str,
     cv_metrics: pd.DataFrame | None = None,
     tune: bool = False,
-    extra_params: dict | None = None,
 ) -> None:
     """
-    Train LightGBM on all xG era data.
-    If tune=True, run Optuna on the last CV fold (fold 3) to find best hyperparams,
-    then retrain on all data with those params.
+    Build a tabular model on the full dataset and serialise the bundle.
+
+    For lgbm with tune=True, runs Optuna on the last CV fold to find best
+    hyperparameters, then retrains on all data with those params.
     """
     X = df[feat_cols]
     y = df['total_points']
+    s = df['season_id']
 
-    tuned_params: dict | None = None
-    if tune:
-        log.info(f'[train_lgbm] {position}: running Optuna on fold 3 ...')
+    extra_params: dict | None = None
+    if spec.name == 'lgbm' and tune:
+        log.info(f'[train] {position}/lgbm: running Optuna on fold 3 ...')
         from ml.evaluate import CV_FOLDS, split_fold, _tune_lgbm
         train_seasons, val_season = CV_FOLDS[-1]
         train_df, val_df = split_fold(df, train_seasons, val_season)
-        X_tr = train_df[feat_cols]
-        y_tr = train_df['total_points']
-        X_v  = val_df[feat_cols]
-        y_v  = val_df['total_points']
-        tuned_params = _tune_lgbm(X_tr, y_tr, X_v, y_v, position)
-        log.info(f'[train_lgbm] {position}: best tuned params {tuned_params}')
+        tuned = _tune_lgbm(
+            train_df[feat_cols], train_df['total_points'],
+            val_df[feat_cols],   val_df['total_points'],
+            position,
+        )
+        log.info(f'[train] {position}/lgbm: best tuned params {tuned}')
+        extra_params = tuned
 
-    combined_extra = {**(tuned_params or {}), **(extra_params or {})}
-    bundle = build_lgbm(X, y, position, extra_params=combined_extra if combined_extra else None)
-    bundle['model_name'] = 'lgbm'
+    bundle = spec.build_fn(
+        X, y, position,
+        sid_train=s,
+        tune=tune,
+        extra_params=extra_params,
+        _train_df=df,
+    )
+    bundle['model_name'] = spec.name
     bundle['position']   = position
-
-    _save(position, 'lgbm', bundle, df, cv_metrics)
+    _save(position, spec.name, bundle, df, cv_metrics)
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +158,8 @@ def _load_cv_metrics(position: str) -> pd.DataFrame | None:
     path = LOGS_DIR / f'cv_metrics_{position}.csv'
     if path.exists():
         df = pd.read_csv(path)
-        return df[df['model'].isin(['baseline', 'ridge', 'lgbm'])]
+        model_names = list(get_registry().keys())
+        return df[df['model'].isin(model_names)]
     return None
 
 
@@ -201,11 +169,20 @@ def _load_cv_metrics(position: str) -> pd.DataFrame | None:
 
 def train_position(
     position: str,
-    models: tuple[str, ...] = VALID_MODELS,
+    models: tuple[str, ...] | None = None,
     eval_first: bool = False,
     tune: bool = False,
 ) -> None:
     """Train all requested models for one position."""
+    registry = get_registry()
+    if models is None:
+        model_names = [n for n, s in registry.items() if s.family in ('tabular', 'decomposed')]
+    else:
+        model_names = list(models)
+        for name in model_names:
+            if name not in registry:
+                raise ValueError(f'Unknown model "{name}". Available: {sorted(registry)}')
+
     if eval_first:
         log.info(f'[eval_first] Running CV for {position} ...')
         metrics_df, _, _ = run_cv(position)
@@ -224,23 +201,23 @@ def train_position(
     log.info(f'[train] {position}: {len(df):,} rows, {len(feat_cols)} features, '
              f'seasons {sorted(df["season_id"].unique().tolist())}')
 
-    for model_name in models:
+    for model_name in model_names:
         log.info(f'[train] {position}/{model_name} ...')
-        if model_name == 'baseline':
-            train_baseline(df, feat_cols, position, cv_metrics)
-        elif model_name == 'ridge':
-            train_ridge(df, feat_cols, position, cv_metrics)
-        elif model_name == 'lgbm':
-            train_lgbm(df, feat_cols, position, cv_metrics, tune=tune)
-        else:
-            log.warning(f'Unknown model "{model_name}", skipping')
+        spec = get_model(model_name)
+        if spec.family == 'meta':
+            log.warning(
+                f'[train] {position}/{model_name}: meta-models cannot be trained standalone '
+                f'(they require OOF base model predictions). Use ml.evaluate for CV results.'
+            )
+            continue
+        _train_tabular(spec, df, feat_cols, position, cv_metrics, tune=tune)
 
 
 def train_all(
     eval_first: bool = False,
     tune: bool = False,
 ) -> None:
-    """Train all Tier 1 models for all positions."""
+    """Train all registered tabular models for all positions."""
     log.info('Training all positions: ' + ', '.join(VALID_POSITIONS))
     for position in VALID_POSITIONS:
         log.info(f'\n{"="*60}')
@@ -251,6 +228,113 @@ def train_all(
 
 
 # ---------------------------------------------------------------------------
+# Meta-model training (simple_avg, stacking, blending)
+# ---------------------------------------------------------------------------
+
+def train_meta_position(position: str) -> None:
+    """
+    Build and serialise meta-model bundles for one position.
+
+    Meta-models (simple_avg, stacking, blending) cannot be trained on a
+    single full-data pass because they require out-of-fold base model
+    predictions. This function reads the OOF parquet already written by
+    ml.evaluate and fits each meta-learner on the full OOF stack (all 3
+    folds), giving the meta-model maximum signal before serialisation.
+
+    Requires: logs/training/cv_preds_{position}.parquet (from ml.evaluate).
+    """
+    from sklearn.linear_model import ElasticNet as _EN, Ridge as _Ridge
+    from sklearn.preprocessing import StandardScaler as _Scaler
+
+    oof_path = LOGS_DIR / f'cv_preds_{position}.parquet'
+    if not oof_path.exists():
+        log.error(
+            f'[meta] {position}: OOF parquet not found at {oof_path}. '
+            f'Run `python -m ml.evaluate --position {position}` first.'
+        )
+        return
+
+    oof_df     = pd.read_parquet(oof_path)
+    y_oof      = oof_df['total_points'].values
+    cv_metrics = _load_cv_metrics(position)
+
+    # Full feature matrix is only used for metadata (train_seasons, n_rows)
+    df = build_feature_matrix(position)
+
+    log.info(
+        f'[meta] {position}: OOF rows={len(oof_df):,}, '
+        f'seasons={sorted(oof_df["season_id"].unique().tolist())}'
+    )
+
+    for spec in meta_models():
+        log.info(f'[meta] {position}/{spec.name} ...')
+
+        pred_cols = [f'pred_{d}' for d in spec.deps]
+        available = [d for d, c in zip(spec.deps, pred_cols) if c in oof_df.columns]
+        avail_cols = [f'pred_{d}' for d in available]
+
+        if not available:
+            log.warning(
+                f'[meta] {position}/{spec.name}: none of {spec.deps} found in OOF parquet; '
+                f'run ml.evaluate to regenerate.'
+            )
+            continue
+
+        X_meta = oof_df[avail_cols].fillna(0.0).values
+
+        if spec.name == 'simple_avg':
+            # No fitting required — equal weights across available deps
+            n = len(available)
+            bundle = {
+                'meta_model':   None,
+                'scaler':       None,
+                'base_models':  available,
+                'weights':      np.ones(n) / n,
+                'feature_cols': available,
+            }
+
+        elif spec.name in ('stacking', 'blending'):
+            scaler = _Scaler()
+            X_scaled = scaler.fit_transform(X_meta)
+
+            if spec.name == 'stacking':
+                meta_model = _Ridge(alpha=0.5, random_state=42)
+            else:
+                meta_model = _EN(l1_ratio=0.5, alpha=0.5, max_iter=2000, random_state=42)
+
+            meta_model.fit(X_scaled, y_oof)
+            log.info(
+                f'[meta] {position}/{spec.name}: fitted on {len(X_meta):,} OOF rows '
+                f'({len(available)} base models)'
+            )
+            bundle = {
+                'meta_model':   meta_model,
+                'scaler':       scaler,
+                'base_models':  available,
+                'feature_cols': available,
+            }
+
+        else:
+            log.warning(f'[meta] {position}/{spec.name}: unrecognised meta-model, skipping')
+            continue
+
+        bundle['model_name'] = spec.name
+        bundle['position']   = position
+        _save(position, spec.name, bundle, oof_df, cv_metrics)
+
+
+def train_meta_all() -> None:
+    """Build and serialise meta-model bundles for all positions."""
+    log.info('Building meta-models for all positions: ' + ', '.join(VALID_POSITIONS))
+    for position in VALID_POSITIONS:
+        log.info(f'\n{"="*60}')
+        log.info(f'Position: {position}')
+        log.info('='*60)
+        train_meta_position(position)
+    log.info(f'\n[done] Meta-models serialised to {MODELS_DIR}')
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -258,25 +342,44 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description='FPL Phase 5 final model training')
     p.add_argument('--position', choices=list(VALID_POSITIONS),
                    help='Train for one position only (default: all)')
-    p.add_argument('--model', choices=list(VALID_MODELS),
-                   help='Train one model only (default: all)')
+    p.add_argument('--model', choices=sorted(get_registry()),
+                   help='Train one model only (default: all tabular+decomposed)')
     p.add_argument('--eval-first', action='store_true',
                    help='Run CV evaluation before training')
     p.add_argument('--tune', action='store_true',
                    help='Optuna tuning for LightGBM (uses fold 3 for search)')
+    p.add_argument('--meta', action='store_true',
+                   help='Train meta-models only (simple_avg, stacking, blending) '
+                        'from OOF parquets in logs/training/')
+    p.add_argument('--all', dest='train_all', action='store_true',
+                   help='Train both tabular+decomposed models and meta-models')
     return p.parse_args()
 
 
 if __name__ == '__main__':
-    args = _parse_args()
-    models = (args.model,) if args.model else VALID_MODELS
+    args   = _parse_args()
+    models = (args.model,) if args.model else None
 
-    if args.position:
-        train_position(
-            args.position,
-            models=models,
-            eval_first=args.eval_first,
-            tune=args.tune,
-        )
+    if args.meta:
+        if args.position:
+            train_meta_position(args.position)
+        else:
+            train_meta_all()
+    elif args.train_all:
+        if args.position:
+            train_position(args.position, models=models,
+                           eval_first=args.eval_first, tune=args.tune)
+            train_meta_position(args.position)
+        else:
+            train_all(eval_first=args.eval_first, tune=args.tune)
+            train_meta_all()
     else:
-        train_all(eval_first=args.eval_first, tune=args.tune)
+        if args.position:
+            train_position(
+                args.position,
+                models=models,
+                eval_first=args.eval_first,
+                tune=args.tune,
+            )
+        else:
+            train_all(eval_first=args.eval_first, tune=args.tune)
