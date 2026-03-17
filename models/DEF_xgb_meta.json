@@ -1,6 +1,6 @@
 {
   "position": "DEF",
-  "model": "ridge",
+  "model": "xgb",
   "feature_cols": [
     "was_home",
     "opponent_season_rank",
@@ -29,13 +29,13 @@
     10
   ],
   "n_train_rows": 13723,
-  "trained_at": "2026-03-17T20:59:29.268294+00:00",
+  "trained_at": "2026-03-17T20:59:29.930838+00:00",
   "cv_mae_by_fold": [
-    2.1438,
-    2.0381,
-    2.2309
+    2.3723,
+    2.0892,
+    2.2711
   ],
-  "cv_mae_mean": 2.1376,
-  "cv_rmse_mean": 2.8882,
-  "cv_spearman_mean": 0.277
+  "cv_mae_mean": 2.2442,
+  "cv_rmse_mean": 3.0115,
+  "cv_spearman_mean": 0.2059
 }

@@ -1,18 +1,19 @@
 {
-  "position": "DEF",
-  "model": "ridge",
+  "position": "FWD",
+  "model": "last_season_avg",
   "feature_cols": [
     "was_home",
     "opponent_season_rank",
-    "team_goals_conceded_season",
-    "team_cs_rolling_3gw",
     "team_goals_scored_rolling_3gw",
     "pts_rolling_3gw",
     "pts_rolling_5gw",
     "mins_rolling_3gw",
-    "cs_rolling_5gw",
+    "goals_rolling_5gw",
+    "assists_rolling_5gw",
     "bonus_rolling_5gw",
-    "xgc_rolling_5gw",
+    "xg_rolling_5gw",
+    "xa_rolling_5gw",
+    "xgi_rolling_5gw",
     "season_pts_per_gw_to_date",
     "season_starts_rate_to_date",
     "start_cost",
@@ -28,14 +29,14 @@
     9,
     10
   ],
-  "n_train_rows": 13723,
-  "trained_at": "2026-03-17T20:59:29.268294+00:00",
+  "n_train_rows": 4951,
+  "trained_at": "2026-03-17T20:59:46.309885+00:00",
   "cv_mae_by_fold": [
-    2.1438,
-    2.0381,
-    2.2309
+    2.4502,
+    2.4974,
+    2.2641
   ],
-  "cv_mae_mean": 2.1376,
-  "cv_rmse_mean": 2.8882,
-  "cv_spearman_mean": 0.277
+  "cv_mae_mean": 2.4039,
+  "cv_rmse_mean": 3.4174,
+  "cv_spearman_mean": 0.3485
 }
