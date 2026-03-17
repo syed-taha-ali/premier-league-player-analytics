@@ -19,7 +19,14 @@ analysis, known limitations, and implications for subsequent phases.
 | `ml/train.py` | Trains final models on all xG era data and serialises artefacts |
 | `ml/predict.py` | Inference: loads serialised models, generates ranked GW predictions |
 
-### 1.2 Models Implemented (Tier 1)
+### 1.2 Models Implemented
+
+This report documents the Tier 1 pipeline delivered in the original Phase 5 commit.
+Tiers 2 and 3 (19 additional models) were subsequently implemented via `ml/models.py`
+— see `revised_modelling_plan.md` for the full inventory and `revised_modelling_implementation_plan.md`
+for the batch-by-batch implementation record.
+
+**Tier 1 (documented here):**
 
 | Model | Description |
 |-------|-------------|
@@ -27,7 +34,19 @@ analysis, known limitations, and implications for subsequent phases.
 | `ridge` | Ridge regression (L2, alpha=1.0) with stratified mean imputation and StandardScaler |
 | `lgbm` | LightGBM with position-specific hyperparameters; native NaN handling |
 
-All three models are trained separately for each position (GK, DEF, MID, FWD). Cross-position
+**Tiers 2 and 3 (implemented subsequently, not documented in detail here):**
+
+| Family | Models |
+|--------|--------|
+| Linear | `elasticnet`, `bayesian_ridge`, `lasso`, `poisson_glm` |
+| Baselines | `position_mean`, `fdr_mean`, `last_season_avg` |
+| Gradient boosting | `xgb`, `random_forest`, `extra_trees`, `hist_gb` |
+| Neural (tabular) | `mlp`, `poly_ridge` |
+| Decomposed | `minutes_model`, `component_model` |
+| Meta / ensemble | `simple_avg`, `stacking`, `blending` |
+| Sequential | `lstm`, `gru` (via `ml/evaluate_sequential.py`) |
+
+All models are trained separately for each position (GK, DEF, MID, FWD). Cross-position
 training is strictly prohibited and enforced by the pipeline.
 
 ### 1.3 CV Setup
@@ -42,7 +61,8 @@ Expanding-window temporal cross-validation; no random splitting.
 
 ### 1.4 Serialised Artefacts
 
-12 model bundles serialised to `models/` (4 positions x 3 models):
+168 model artefacts serialised to `models/` (4 positions × 22 models × .pkl + _meta.json).
+The Tier 1 artefacts described here are:
 
 - `{position}_{model}.pkl` — full bundle: sklearn/LightGBM object, scaler, imputer state, feature list
 - `{position}_{model}_meta.json` — human-readable metadata: feature list, training rows, CV MAE, CV Spearman
@@ -88,8 +108,9 @@ Expanding-window temporal cross-validation; no random splitting.
 - **Optuna tuning implemented but not run by default:** The `--tune` flag exists and is
   functional. Default runs use the plan-specified starting hyperparameters. See section 5.2
   for the case for running tuning before Phase 8.
-- **Tier 2 models (XGBoost, Random Forest, MLP) not implemented:** The plan designates
-  these as post-Tier-1. Tier 1 results are strong and provide a clear production baseline.
+- **Tier 2 and 3 models implemented separately:** All models from `revised_modelling_plan.md`
+  have since been implemented via the batch-rollout described in `revised_modelling_implementation_plan.md`.
+  CV metrics for all 22 models are in `logs/training/cv_metrics_{position}.csv`.
 
 ---
 

@@ -251,9 +251,11 @@ Feature applicability by position:
 - `ml/evaluate.py` — 3-fold expanding-window CV; metrics, calibration plots, SHAP plots
 - `ml/train.py` — final model training on all xG era data; serialises to `models/`
 - `ml/predict.py` — inference pipeline; per-GW ranked predictions
-- `models/` — 12 serialised model bundles (4 positions × 3 models: baseline, ridge, lgbm)
-- `logs/training/` — CV metrics CSVs, OOF predictions parquets, per-position markdown reports
-- `outputs/models/` — calibration, MAE-by-fold, and SHAP plots (12 PNGs total)
+- `models/` — 168 serialised model artefacts (4 positions × 22 models × .pkl + _meta.json); see `revised_modelling_plan.md` for the full model inventory
+- `ml/models.py` — central model registry (ModelSpec dataclass, build_fn / predict_fn for all 22 models)
+- `ml/evaluate_sequential.py` — standalone CV pipeline for LSTM / GRU (separate from tabular loop)
+- `logs/training/` — CV metrics CSVs, OOF predictions parquets, per-position markdown reports, sequential CV metrics
+- `outputs/models/` — calibration, MAE-by-fold, and SHAP plots (12 PNGs)
 - `docs/modelling_report.md` — full results report: CV metrics, feature analysis, Phase 7+ implications
 
 **Key result:** Ridge is the production model for all positions (CV MAE: GK 2.132 | DEF 2.138 |

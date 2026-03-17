@@ -5,11 +5,17 @@ Loads the trained model artefacts from models/ and the current feature matrix
 from outputs/features/, then produces a ranked prediction table for the
 most recent available GW (or a specified GW).
 
+All 22 registered models are available (tabular, decomposed, and meta families).
+Sequential models (lstm, gru) are excluded — use ml/evaluate_sequential.py for those.
+Meta-models (simple_avg, stacking, blending) automatically load and run their
+base models before combining predictions.
+
 Usage:
-    python -m ml.predict                       # predict latest GW, all models
-    python -m ml.predict --gw 25 --season 10   # specify GW and season
-    python -m ml.predict --model lgbm          # single model
-    python -m ml.predict --top 20              # show top-20 per position
+    python -m ml.predict                          # predict latest GW using lgbm
+    python -m ml.predict --gw 25 --season 10      # specify GW and season
+    python -m ml.predict --model ridge            # single model
+    python -m ml.predict --models ridge xgb lgbm  # ensemble of named models
+    python -m ml.predict --top 20                 # show top-20 per position
 
 Outputs:
     outputs/predictions/gw{N}_s{season}_predictions.csv
