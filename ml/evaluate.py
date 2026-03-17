@@ -444,6 +444,8 @@ def run_cv(
                 X_val=X_val, y_val=y_val,
                 sid_train=sid_tr, sid_val=sid_v,
                 tune=tune_lgbm,
+                _train_df=train_df,
+                _val_df=val_df,
             )
             preds = bundle['preds']
             _record_metrics(records, fold_idx, spec.name, y_val.values, preds, gw_keys, val_df)

@@ -698,6 +698,313 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
+# Batch 3: poisson_glm, fdr_mean, last_season_avg
+# ---------------------------------------------------------------------------
+
+def _build_poisson_glm(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    position: str,
+    X_val: pd.DataFrame | None = None,
+    y_val: pd.Series | None = None,
+    sid_train: pd.Series | None = None,
+    sid_val: pd.Series | None = None,
+    **kwargs,
+) -> dict:
+    """
+    Statsmodels GLM with Poisson family.
+
+    total_points can be negative (red card = -1), so we shift the target by
+    min_shift = max(0, 1 - y_min) so the minimum is 1. The shift is subtracted
+    at inference time.
+    """
+    import statsmodels.api as sm
+    from ml.evaluate import stratified_impute
+
+    if X_val is not None and sid_val is not None:
+        X_tr_f, X_v_f, season_means, global_means = stratified_impute(
+            X_train, X_val, sid_train, sid_val
+        )
+    else:
+        X_tr_f, _, season_means, global_means = stratified_impute(
+            X_train, X_train, sid_train, sid_train
+        )
+        X_v_f = None
+
+    min_shift = max(0.0, 1.0 - float(y_train.min()))
+    y_shifted = y_train.values.astype(float) + min_shift
+
+    X_tr_const = np.column_stack([np.ones(len(X_tr_f)), X_tr_f.values])
+    model = sm.GLM(
+        y_shifted, X_tr_const,
+        family=sm.families.Poisson(),
+    ).fit(disp=False)
+
+    preds = None
+    if X_v_f is not None:
+        X_v_const = np.column_stack([np.ones(len(X_v_f)), X_v_f.values])
+        preds = model.predict(X_v_const) - min_shift
+
+    return {
+        'model':        model,
+        'season_means': season_means,
+        'global_means': global_means,
+        'min_shift':    min_shift,
+        'feature_cols': list(X_train.columns),
+        'preds':        preds,
+    }
+
+
+def _predict_poisson_glm(
+    bundle: dict,
+    X: pd.DataFrame,
+    sid: pd.Series | None = None,
+    **kwargs,
+) -> np.ndarray:
+    feat_cols    = bundle['feature_cols']
+    season_means = bundle['season_means']
+    global_means = bundle['global_means']
+    model        = bundle['model']
+    min_shift    = bundle['min_shift']
+
+    X_aligned = X[feat_cols].reset_index(drop=True)
+    X_arr     = X_aligned.values.astype(float)
+    gm        = global_means[feat_cols].values
+
+    if sid is not None:
+        s_vals = sid.reset_index(drop=True).values
+        fill   = np.empty_like(X_arr)
+        for i, s in enumerate(s_vals):
+            if s in season_means.index:
+                fill[i] = season_means.loc[s, feat_cols].values
+            else:
+                fill[i] = gm
+        fill = np.where(np.isnan(fill), gm, fill)
+    else:
+        fill = np.tile(gm, (len(X_arr), 1))
+
+    nan_mask = np.isnan(X_arr)
+    X_filled = np.where(nan_mask, fill, X_arr)
+    X_filled = np.where(np.isnan(X_filled), gm, X_filled)
+
+    X_const = np.column_stack([np.ones(len(X_filled)), X_filled])
+    return model.predict(X_const) - min_shift
+
+
+def _fdr_bin(rank: float) -> str:
+    """Map opponent_season_rank to difficulty bin A/B/C."""
+    if rank <= 6:
+        return 'A'
+    elif rank <= 14:
+        return 'B'
+    else:
+        return 'C'
+
+
+def _build_fdr_mean(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    position: str,
+    X_val: pd.DataFrame | None = None,
+    y_val: pd.Series | None = None,
+    sid_train: pd.Series | None = None,
+    sid_val: pd.Series | None = None,
+    **kwargs,
+) -> dict:
+    """
+    Non-ML fixture-difficulty multiplier model.
+
+    Bins opponent_season_rank into A (top 6), B (7-14), C (15-20).
+    Multiplier for each bin = mean(actual_pts) / mean(pts_rolling_5gw) on
+    training fold. Prediction = pts_rolling_5gw * multiplier[bin].
+    """
+    fallback = float(y_train.mean())
+    rolling  = X_train['pts_rolling_5gw'].fillna(0.0)
+    bins_tr  = X_train['opponent_season_rank'].fillna(10.0).map(_fdr_bin)
+
+    multipliers: dict[str, float] = {}
+    for b in ('A', 'B', 'C'):
+        mask = bins_tr == b
+        if mask.any():
+            mean_rolling = float(rolling[mask].mean())
+            multipliers[b] = (
+                float(y_train[mask].mean()) / mean_rolling
+                if mean_rolling > 0.0
+                else 1.0
+            )
+        else:
+            multipliers[b] = 1.0
+
+    preds = None
+    if X_val is not None:
+        rolling_v = X_val['pts_rolling_5gw'].reset_index(drop=True)
+        bins_v    = X_val['opponent_season_rank'].fillna(10.0).map(_fdr_bin).reset_index(drop=True)
+        preds = np.array([
+            rolling_v.iloc[i] * multipliers.get(bins_v.iloc[i], 1.0)
+            if not pd.isna(rolling_v.iloc[i])
+            else fallback
+            for i in range(len(X_val))
+        ])
+
+    return {
+        'multipliers': multipliers,
+        'fallback':    fallback,
+        'feature_cols': list(X_train.columns),
+        'preds':        preds,
+    }
+
+
+def _predict_fdr_mean(
+    bundle: dict,
+    X: pd.DataFrame,
+    sid: pd.Series | None = None,
+    **kwargs,
+) -> np.ndarray:
+    multipliers = bundle['multipliers']
+    fallback    = bundle['fallback']
+    rolling_v   = X['pts_rolling_5gw'].reset_index(drop=True)
+    bins_v      = X['opponent_season_rank'].fillna(10.0).map(_fdr_bin).reset_index(drop=True)
+    return np.array([
+        rolling_v.iloc[i] * multipliers.get(bins_v.iloc[i], 1.0)
+        if not pd.isna(rolling_v.iloc[i])
+        else fallback
+        for i in range(len(X))
+    ])
+
+
+def _build_last_season_avg(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    position: str,
+    X_val: pd.DataFrame | None = None,
+    y_val: pd.Series | None = None,
+    sid_train: pd.Series | None = None,
+    sid_val: pd.Series | None = None,
+    **kwargs,
+) -> dict:
+    """
+    Cold-start model: GW1 rows use player's mean pts from the prior season
+    (taken from the training fold). All other rows use pts_rolling_5gw.
+
+    Requires _train_df and _val_df kwargs for player_code / gw / season_id context.
+    Logs GW1-specific MAE as a supplementary diagnostic.
+    """
+    import logging
+    log = logging.getLogger(__name__)
+
+    _train_df       = kwargs.get('_train_df')
+    _val_df         = kwargs.get('_val_df')
+    global_fallback = float(y_train.mean())
+
+    # Build lookup: (player_code, season_id) -> mean total_points on training fold
+    player_prior_season: dict[tuple, float] = {}
+    if _train_df is not None:
+        grp = _train_df.groupby(['player_code', 'season_id'])['total_points'].mean()
+        player_prior_season = {k: float(v) for k, v in grp.items()}
+
+    preds = None
+    if X_val is not None and _val_df is not None:
+        rolling_v = X_val['pts_rolling_5gw'].reset_index(drop=True)
+        gw_v      = _val_df['gw'].reset_index(drop=True)
+        player_v  = _val_df['player_code'].reset_index(drop=True)
+        season_v  = _val_df['season_id'].reset_index(drop=True)
+
+        preds      = np.empty(len(X_val))
+        gw1_idxs  = []
+        for i in range(len(X_val)):
+            if int(gw_v.iloc[i]) == 1:
+                prior_key = (player_v.iloc[i], int(season_v.iloc[i]) - 1)
+                preds[i]  = player_prior_season.get(prior_key, global_fallback)
+                gw1_idxs.append(i)
+            else:
+                r        = rolling_v.iloc[i]
+                preds[i] = r if not pd.isna(r) else global_fallback
+
+        if gw1_idxs and y_val is not None:
+            from sklearn.metrics import mean_absolute_error
+            gw1_mae = mean_absolute_error(
+                y_val.iloc[gw1_idxs].values, preds[gw1_idxs]
+            )
+            log.info(
+                f'[last_season_avg] {position} GW1 MAE = {gw1_mae:.4f} '
+                f'(n_gw1={len(gw1_idxs)})'
+            )
+
+    return {
+        'player_prior_season': player_prior_season,
+        'global_fallback':     global_fallback,
+        'feature_cols':        list(X_train.columns),
+        'preds':               preds,
+    }
+
+
+def _predict_last_season_avg(
+    bundle: dict,
+    X: pd.DataFrame,
+    sid: pd.Series | None = None,
+    **kwargs,
+) -> np.ndarray:
+    _df            = kwargs.get('_df')
+    player_prior   = bundle['player_prior_season']
+    global_fallback = bundle['global_fallback']
+    rolling_v      = X['pts_rolling_5gw'].reset_index(drop=True)
+
+    n     = len(X)
+    preds = np.empty(n)
+
+    if _df is not None:
+        gw_v     = _df['gw'].reset_index(drop=True)
+        player_v = _df['player_code'].reset_index(drop=True)
+        season_v = _df['season_id'].reset_index(drop=True)
+        for i in range(n):
+            if int(gw_v.iloc[i]) == 1:
+                prior_key = (player_v.iloc[i], int(season_v.iloc[i]) - 1)
+                preds[i]  = player_prior.get(prior_key, global_fallback)
+            else:
+                r        = rolling_v.iloc[i]
+                preds[i] = r if not pd.isna(r) else global_fallback
+    else:
+        for i in range(n):
+            r        = rolling_v.iloc[i]
+            preds[i] = r if not pd.isna(r) else global_fallback
+
+    return preds
+
+
+# Batch 3 registrations --------------------------------------------------
+
+_register(ModelSpec(
+    name='poisson_glm',
+    family='tabular',
+    tier=2,
+    requires_imputation=True,
+    requires_scaling=False,
+    build_fn=_build_poisson_glm,
+    predict_fn=_predict_poisson_glm,
+))
+
+_register(ModelSpec(
+    name='fdr_mean',
+    family='tabular',
+    tier=2,
+    requires_imputation=False,
+    requires_scaling=False,
+    build_fn=_build_fdr_mean,
+    predict_fn=_predict_fdr_mean,
+))
+
+_register(ModelSpec(
+    name='last_season_avg',
+    family='tabular',
+    tier=2,
+    requires_imputation=False,
+    requires_scaling=False,
+    build_fn=_build_last_season_avg,
+    predict_fn=_predict_last_season_avg,
+))
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 

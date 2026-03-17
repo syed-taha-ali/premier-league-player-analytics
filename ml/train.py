@@ -88,6 +88,7 @@ def _train_tabular(
         sid_train=s,
         tune=tune,
         extra_params=extra_params,
+        _train_df=df,
     )
     bundle['model_name'] = spec.name
     bundle['position']   = position

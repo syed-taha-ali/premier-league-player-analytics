@@ -88,7 +88,7 @@ def predict_position(
     X          = df_predict[feat_cols]
     season_ids = df_predict['season_id']
 
-    preds = spec.predict_fn(bundle, X, sid=season_ids)
+    preds = spec.predict_fn(bundle, X, sid=season_ids, _df=df_predict)
     return pd.Series(preds, index=df_predict.index, name=f'pred_{model_name}')
 
 

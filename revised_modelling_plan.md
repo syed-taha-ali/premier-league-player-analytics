@@ -17,8 +17,8 @@ per-model bundle specs, and verification gates) see `revised_modelling_implement
 |-------|-------------|:----:|--------|
 | Position mean | Mean pts by position x home/away | 1 | Implemented |
 | Rolling N-GW mean | Last 3 or 5 GWs | 1 | Implemented |
-| FDR-adjusted mean | Rolling mean x opponent difficulty multiplier | 2 | Not implemented |
-| Last season avg | Prior season pts/GW | 2 | Not implemented |
+| FDR-adjusted mean | Rolling mean x opponent difficulty multiplier | 2 | Implemented |
+| Last season avg | Prior season pts/GW | 2 | Implemented |
 
 ### B — Linear Models
 
@@ -29,7 +29,7 @@ per-model bundle specs, and verification gates) see `revised_modelling_implement
 | Lasso Regression | OLS + L1 penalty | 3 | Implemented |
 | ElasticNet | L1 + L2 combined | 2 | Implemented |
 | Polynomial + Ridge | Degree-2 interactions + Ridge | 3 | Not implemented |
-| Poisson GLM | GLM with log link | 2 | Not implemented |
+| Poisson GLM | GLM with log link | 2 | Implemented |
 
 ### C — Tree-Based Models
 
