@@ -53,8 +53,8 @@ per-model bundle specs, and verification gates) see `revised_modelling_implement
 | Model | Description | Tier | Status |
 |-------|-------------|:----:|--------|
 | MLP | Fully-connected feed-forward net | 2 | Implemented |
-| LSTM | Recurrent net over GW sequences | 3 | Not implemented |
-| GRU | Lighter variant of LSTM | 3 | Not implemented |
+| LSTM | Recurrent net over GW sequences | 3 | Implemented |
+| GRU | Lighter variant of LSTM | 3 | Implemented |
 | Temporal Fusion Transformer | Attention-based TS model | 3 | Not implemented |
 | N-BEATS / N-HiTS | Neural basis expansion TS | 3 | Not implemented |
 

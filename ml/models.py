@@ -1725,6 +1725,49 @@ _register(ModelSpec(
 
 
 # ---------------------------------------------------------------------------
+# Batch 6 — Sequential model stubs (LSTM, GRU)
+#
+# These are registered so that get_registry() / sequential_models() work,
+# but build_fn / predict_fn are NOT called by the main tabular pipeline.
+# All training and evaluation is handled by ml/evaluate_sequential.py.
+# ---------------------------------------------------------------------------
+
+def _seq_build_stub(X_train, y_train, position, **kwargs):
+    raise NotImplementedError(
+        'Sequential models must be trained via ml/evaluate_sequential.py, '
+        'not through the main tabular train pipeline.'
+    )
+
+
+def _seq_predict_stub(bundle, X, **kwargs):
+    raise NotImplementedError(
+        'Sequential models are not supported by the tabular predict pipeline. '
+        'Use ml/evaluate_sequential.py instead.'
+    )
+
+
+_register(ModelSpec(
+    name='lstm',
+    family='sequential',
+    tier=3,
+    requires_imputation=True,
+    requires_scaling=True,
+    build_fn=_seq_build_stub,
+    predict_fn=_seq_predict_stub,
+))
+
+_register(ModelSpec(
+    name='gru',
+    family='sequential',
+    tier=3,
+    requires_imputation=True,
+    requires_scaling=True,
+    build_fn=_seq_build_stub,
+    predict_fn=_seq_predict_stub,
+))
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
