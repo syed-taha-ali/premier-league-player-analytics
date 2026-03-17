@@ -26,8 +26,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
+import logging
+
 import numpy as np
 import pandas as pd
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -1001,6 +1005,217 @@ _register(ModelSpec(
     requires_scaling=False,
     build_fn=_build_last_season_avg,
     predict_fn=_predict_last_season_avg,
+))
+
+
+# ---------------------------------------------------------------------------
+# Batch 4: mlp (tabular), simple_avg and stacking (meta)
+# ---------------------------------------------------------------------------
+
+def _build_mlp(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    position: str,
+    X_val: pd.DataFrame | None = None,
+    y_val: pd.Series | None = None,
+    sid_train: pd.Series | None = None,
+    sid_val: pd.Series | None = None,
+    **kwargs,
+) -> dict:
+    from sklearn.neural_network import MLPRegressor
+    hidden = (32, 16) if position == 'GK' else (64, 32)
+    estimator = MLPRegressor(
+        hidden_layer_sizes=hidden,
+        activation='relu',
+        max_iter=500,
+        early_stopping=True,
+        validation_fraction=0.1,
+        random_state=42,
+    )
+    return _build_scaled_linear(
+        estimator, X_train, y_train, position, X_val, y_val, sid_train, sid_val
+    )
+
+
+# ---------------------------------------------------------------------------
+# Meta-model helpers
+#
+# Meta-model build_fn signature differs from tabular:
+#     build_fn(dep_preds: dict, y_val: np.ndarray, position: str, **kwargs) -> bundle
+#
+#   dep_preds    : {model_name: np.ndarray} of val-fold predictions for each dep
+#   y_val        : actual targets for this validation fold
+#   _oof_records : list[dict] of previous-fold OOF entries passed by evaluate.py;
+#                  each entry has {model_name: preds_array, 'y': actuals_array}
+#
+# Meta-model predict_fn signature is the same as tabular:
+#     predict_fn(bundle, X, sid=None, **kwargs) -> np.ndarray
+# X is the raw feature DataFrame (not used directly); base predictions are
+# supplied via the _dep_preds kwarg by predict.py.
+# ---------------------------------------------------------------------------
+
+def _build_simple_avg(
+    dep_preds: dict,
+    y_val: np.ndarray,
+    position: str,
+    **kwargs,
+) -> dict:
+    """
+    Uniform-weight average of base model predictions.
+    No fitting required — weights are equal across all deps with non-None preds.
+    """
+    base_models = [m for m, p in dep_preds.items() if p is not None]
+    if not base_models:
+        return {
+            'base_models': [],
+            'weights':     np.array([]),
+            'feature_cols': [],
+            'preds':       np.zeros(len(y_val)),
+        }
+    preds_arr = np.column_stack([dep_preds[m] for m in base_models])
+    weights   = np.ones(len(base_models)) / len(base_models)
+    return {
+        'base_models': base_models,
+        'weights':     weights,
+        'feature_cols': base_models,
+        'preds':        preds_arr @ weights,
+    }
+
+
+def _predict_simple_avg(
+    bundle: dict,
+    X: pd.DataFrame,
+    sid: pd.Series | None = None,
+    **kwargs,
+) -> np.ndarray:
+    _dep_preds  = kwargs.get('_dep_preds', {})
+    base_models = bundle['base_models']
+    available   = [m for m in base_models if m in _dep_preds and _dep_preds[m] is not None]
+    if not available:
+        log.warning('[simple_avg] No dep_preds provided -- returning zeros')
+        return np.zeros(len(X))
+    preds_arr = np.column_stack([_dep_preds[m] for m in available])
+    return preds_arr.mean(axis=1)
+
+
+def _build_stacking(
+    dep_preds: dict,
+    y_val: np.ndarray,
+    position: str,
+    **kwargs,
+) -> dict:
+    """
+    Ridge (alpha=0.5) meta-learner stacking.
+
+    Fitted only when >= 2 folds of OOF predictions are available (fold 3 only).
+    For folds 1-2, falls back to equal-weight average since there is no OOF
+    training data yet. Single-fold evaluation is intentional (Tier 3 model).
+    """
+    from sklearn.linear_model import Ridge as _Ridge
+    from sklearn.preprocessing import StandardScaler as _Scaler
+
+    _oof_records = kwargs.get('_oof_records', [])
+    base_models  = [m for m, p in dep_preds.items() if p is not None]
+
+    def _fallback_bundle(preds: np.ndarray) -> dict:
+        return {
+            'meta_model':  None,
+            'scaler':      None,
+            'base_models': base_models,
+            'feature_cols': base_models,
+            'preds':        preds,
+        }
+
+    if not base_models:
+        return _fallback_bundle(np.zeros(len(y_val)))
+
+    X_meta_v = np.column_stack([dep_preds[m] for m in base_models])
+
+    if len(_oof_records) < 2:
+        return _fallback_bundle(X_meta_v.mean(axis=1))
+
+    # Build OOF training matrix from previous folds
+    oof_Xs, oof_ys = [], []
+    for record in _oof_records:
+        available = [m for m in base_models if record.get(m) is not None]
+        if available:
+            oof_Xs.append(np.column_stack([record[m] for m in available]))
+            oof_ys.append(record['y'])
+
+    if not oof_Xs:
+        return _fallback_bundle(X_meta_v.mean(axis=1))
+
+    X_meta_tr = np.vstack(oof_Xs)
+    y_meta_tr = np.concatenate(oof_ys)
+
+    scaler      = _Scaler()
+    meta_model  = _Ridge(alpha=0.5, random_state=42)
+    meta_model.fit(scaler.fit_transform(X_meta_tr), y_meta_tr)
+    preds = meta_model.predict(scaler.transform(X_meta_v))
+
+    return {
+        'meta_model':  meta_model,
+        'scaler':      scaler,
+        'base_models': base_models,
+        'feature_cols': base_models,
+        'preds':        preds,
+    }
+
+
+def _predict_stacking(
+    bundle: dict,
+    X: pd.DataFrame,
+    sid: pd.Series | None = None,
+    **kwargs,
+) -> np.ndarray:
+    _dep_preds  = kwargs.get('_dep_preds', {})
+    meta_model  = bundle.get('meta_model')
+    scaler      = bundle.get('scaler')
+    base_models = bundle['base_models']
+
+    available = [m for m in base_models if m in _dep_preds and _dep_preds[m] is not None]
+    if not available:
+        log.warning('[stacking] No dep_preds provided -- returning zeros')
+        return np.zeros(len(X))
+
+    preds_arr = np.column_stack([_dep_preds[m] for m in available])
+    if meta_model is None or scaler is None:
+        return preds_arr.mean(axis=1)
+    return meta_model.predict(scaler.transform(preds_arr))
+
+
+# Batch 4 registrations --------------------------------------------------
+
+_register(ModelSpec(
+    name='mlp',
+    family='tabular',
+    tier=2,
+    requires_imputation=True,
+    requires_scaling=True,
+    build_fn=_build_mlp,
+    predict_fn=_predict_scaled_linear,
+))
+
+_register(ModelSpec(
+    name='simple_avg',
+    family='meta',
+    tier=2,
+    requires_imputation=False,
+    requires_scaling=False,
+    build_fn=_build_simple_avg,
+    predict_fn=_predict_simple_avg,
+    deps=['ridge', 'xgb', 'elasticnet', 'lgbm'],
+))
+
+_register(ModelSpec(
+    name='stacking',
+    family='meta',
+    tier=3,
+    requires_imputation=False,
+    requires_scaling=False,
+    build_fn=_build_stacking,
+    predict_fn=_predict_stacking,
+    deps=['ridge', 'xgb', 'elasticnet', 'lgbm', 'random_forest'],
 ))
 
 

@@ -418,9 +418,10 @@ def run_cv(
     feat_cols = get_feature_cols(df)
     log.info(f"[cv] {position}: {len(df):,} rows, {len(feat_cols)} features")
 
-    records   = []
-    all_preds = []
-    last_models: dict = {}
+    records     = []
+    all_preds   = []
+    last_models: dict  = {}
+    oof_records: list[dict] = []   # accumulates tabular val predictions across folds for stacking
 
     for fold_idx, (train_seasons, val_season) in enumerate(CV_FOLDS, start=1):
         train_df, val_df = split_fold(df, train_seasons, val_season)
@@ -451,16 +452,28 @@ def run_cv(
             _record_metrics(records, fold_idx, spec.name, y_val.values, preds, gw_keys, val_df)
             fold_bundles[spec.name] = bundle
 
+        # Collect tabular val predictions for stacking OOF (used in later folds)
+        oof_entry: dict = {'y': y_val.values}
+        for _oname, _ob in fold_bundles.items():
+            if _ob.get('preds') is not None:
+                oof_entry[_oname] = _ob['preds']
+
         # ---- Pass 2: meta-models (fit on Pass 1 val predictions) ----
         for spec in meta_models():
             if not all(d in fold_bundles for d in spec.deps):
                 log.warning(f"[cv] Skipping meta-model {spec.name}: deps not satisfied")
                 continue
             dep_preds = {d: fold_bundles[d]['preds'] for d in spec.deps}
-            bundle = spec.build_fn(dep_preds, y_val.values, position)
+            bundle = spec.build_fn(
+                dep_preds, y_val.values, position,
+                _oof_records=list(oof_records),
+            )
             preds = bundle['preds']
             _record_metrics(records, fold_idx, spec.name, y_val.values, preds, gw_keys, val_df)
             fold_bundles[spec.name] = bundle
+
+        # Append current fold after Pass 2 so stacking uses only previous folds
+        oof_records.append(oof_entry)
 
         # ---- Collect predictions ----
         fold_pred = val_df[CONTEXT_COLS + [TARGET_COL]].copy().reset_index(drop=True)

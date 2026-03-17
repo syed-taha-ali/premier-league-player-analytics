@@ -199,6 +199,12 @@ def train_position(
     for model_name in model_names:
         log.info(f'[train] {position}/{model_name} ...')
         spec = get_model(model_name)
+        if spec.family == 'meta':
+            log.warning(
+                f'[train] {position}/{model_name}: meta-models cannot be trained standalone '
+                f'(they require OOF base model predictions). Use ml.evaluate for CV results.'
+            )
+            continue
         _train_tabular(spec, df, feat_cols, position, cv_metrics, tune=tune)
 
 

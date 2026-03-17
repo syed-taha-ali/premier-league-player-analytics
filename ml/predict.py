@@ -88,7 +88,25 @@ def predict_position(
     X          = df_predict[feat_cols]
     season_ids = df_predict['season_id']
 
-    preds = spec.predict_fn(bundle, X, sid=season_ids, _df=df_predict)
+    if spec.family == 'meta':
+        # Run each base model first, then feed predictions into the meta predict_fn
+        dep_preds: dict[str, np.ndarray] = {}
+        for dep in spec.deps:
+            try:
+                dep_bundle = load_model(position, dep)
+                dep_spec   = get_model(dep)
+                dep_preds[dep] = dep_spec.predict_fn(
+                    dep_bundle, X, sid=season_ids, _df=df_predict
+                )
+            except FileNotFoundError:
+                log.warning(f'[predict] Base model {dep} not found for meta-model {model_name}')
+                dep_preds[dep] = np.full(len(X), np.nan)
+        preds = spec.predict_fn(
+            bundle, X, sid=season_ids, _dep_preds=dep_preds, _df=df_predict
+        )
+    else:
+        preds = spec.predict_fn(bundle, X, sid=season_ids, _df=df_predict)
+
     return pd.Series(preds, index=df_predict.index, name=f'pred_{model_name}')
 
 

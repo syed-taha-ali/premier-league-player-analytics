@@ -52,7 +52,7 @@ per-model bundle specs, and verification gates) see `revised_modelling_implement
 
 | Model | Description | Tier | Status |
 |-------|-------------|:----:|--------|
-| MLP | Fully-connected feed-forward net | 2 | Not implemented |
+| MLP | Fully-connected feed-forward net | 2 | Implemented |
 | LSTM | Recurrent net over GW sequences | 3 | Not implemented |
 | GRU | Lighter variant of LSTM | 3 | Not implemented |
 | Temporal Fusion Transformer | Attention-based TS model | 3 | Not implemented |
@@ -77,8 +77,8 @@ per-model bundle specs, and verification gates) see `revised_modelling_implement
 
 | Model | Description | Tier | Status |
 |-------|-------------|:----:|--------|
-| Simple Averaging | Average predictions of multiple models | 2 | Not implemented |
-| Stacking (meta-learner) | Train meta-model on OOF predictions | 3 | Not implemented |
+| Simple Averaging | Average predictions of multiple models | 2 | Implemented |
+| Stacking (meta-learner) | Train meta-model on OOF predictions | 3 | Implemented |
 | Blending | Average on a held-out set | 3 | Not implemented |
 
 ### I — Not Recommended
