@@ -69,7 +69,11 @@ def run_all(conn: sqlite3.Connection) -> None:
 
     # 6. Season-level points reconciliation
     # SUM(fact_gw_player.total_points) per (player_code, season_id) ≈ dim_player_season.total_points
-    reconcile = _q(conn, """
+    # Excludes the current in-progress season: retroactive GW-level corrections by FPL accumulate
+    # in the season total (players_raw.csv) but are not back-propagated to individual GW rows,
+    # so the in-progress season will always show divergence beyond ±5 for corrected players.
+    current_season = _q(conn, "SELECT MAX(season_id) AS s FROM fact_gw_player")['s'].iloc[0]
+    reconcile = _q(conn, f"""
         SELECT
             dps.season_id,
             dps.player_code,
@@ -78,10 +82,11 @@ def run_all(conn: sqlite3.Connection) -> None:
         FROM dim_player_season dps
         LEFT JOIN fact_gw_player f
             ON f.player_code = dps.player_code AND f.season_id = dps.season_id
+        WHERE dps.season_id < {current_season}
         GROUP BY dps.season_id, dps.player_code
         HAVING ABS(COALESCE(SUM(f.total_points), 0) - COALESCE(dps.total_points, 0)) > 5
     """)
-    _check("Season point totals reconcile (within ±5)",
+    _check("Season point totals reconcile (within ±5, completed seasons only)",
            reconcile.empty,
            f"{len(reconcile)} player-seasons diverge" if not reconcile.empty else "")
 

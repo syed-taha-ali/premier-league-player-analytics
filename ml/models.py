@@ -88,6 +88,10 @@ def _predict_baseline(
     return X['pts_rolling_5gw'].fillna(fallback).values
 
 
+_XGI_COL = 'xgi_rolling_5gw'
+_XGI_DROP_POSITIONS = frozenset({'MID', 'FWD'})
+
+
 def _build_ridge(
     X_train: pd.DataFrame,
     y_train: pd.Series,
@@ -96,10 +100,19 @@ def _build_ridge(
     y_val: pd.Series | None = None,
     sid_train: pd.Series | None = None,
     sid_val: pd.Series | None = None,
+    alpha: float = 1.0,
     **kwargs,
 ) -> dict:
     from ml.evaluate import build_ridge
-    return build_ridge(X_train, y_train, sid_train, X_val, sid_val)
+
+    # xg + xa already captures xgi signal; drop collinear xgi for MID/FWD
+    if position in _XGI_DROP_POSITIONS and _XGI_COL in X_train.columns:
+        drop_cols = [_XGI_COL]
+        X_train = X_train.drop(columns=drop_cols)
+        if X_val is not None:
+            X_val = X_val.drop(columns=drop_cols, errors='ignore')
+
+    return build_ridge(X_train, y_train, sid_train, X_val, sid_val, alpha=alpha)
 
 
 def _predict_scaled_linear(

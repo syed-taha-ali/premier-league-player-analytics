@@ -56,6 +56,77 @@ MODELS_DIR = _HERE / 'models'
 # Generic tabular model trainer
 # ---------------------------------------------------------------------------
 
+_ALPHA_GRID = [0.1, 0.5, 1.0, 5.0, 10.0]
+_ALPHA_LOG  = _HERE / 'logs' / 'training' / 'ridge_alpha_search.csv'
+
+
+def _search_ridge_alpha(
+    df: pd.DataFrame,
+    feat_cols: list[str],
+    position: str,
+) -> float:
+    """
+    3-fold expanding-window CV over _ALPHA_GRID for Ridge.
+
+    Returns the alpha with the lowest mean CV MAE.
+    Writes per-fold results to logs/training/ridge_alpha_search.csv.
+    """
+    from sklearn.metrics import mean_absolute_error
+    from ml.evaluate import CV_FOLDS, split_fold, build_ridge
+
+    records: list[dict] = []
+    alpha_maes: dict[float, list[float]] = {a: [] for a in _ALPHA_GRID}
+
+    for fold_idx, (train_seasons, val_season) in enumerate(CV_FOLDS, start=1):
+        train_df, val_df = split_fold(df, train_seasons, val_season)
+        if train_df.empty or val_df.empty:
+            continue
+        X_tr = train_df[feat_cols].reset_index(drop=True)
+        y_tr = train_df['total_points'].reset_index(drop=True)
+        X_v  = val_df[feat_cols].reset_index(drop=True)
+        y_v  = val_df['total_points'].reset_index(drop=True)
+        s_tr = train_df['season_id'].reset_index(drop=True)
+        s_v  = val_df['season_id'].reset_index(drop=True)
+
+        # Apply xgi drop for MID/FWD (mirrors _build_ridge logic)
+        from ml.models import _XGI_COL, _XGI_DROP_POSITIONS
+        if position in _XGI_DROP_POSITIONS and _XGI_COL in X_tr.columns:
+            X_tr = X_tr.drop(columns=[_XGI_COL])
+            X_v  = X_v.drop(columns=[_XGI_COL], errors='ignore')
+
+        for alpha in _ALPHA_GRID:
+            bundle = build_ridge(X_tr, y_tr, s_tr, X_v, s_v, alpha=alpha)
+            mae    = mean_absolute_error(y_v.values, bundle['preds'])
+            alpha_maes[alpha].append(mae)
+            records.append({
+                'position': position,
+                'fold':     fold_idx,
+                'alpha':    alpha,
+                'mae':      round(mae, 4),
+            })
+            log.info(f'[alpha] {position} fold {fold_idx} alpha={alpha:.1f}: MAE={mae:.4f}')
+
+    mean_maes = {a: float(np.mean(v)) for a, v in alpha_maes.items() if v}
+    best_alpha = min(mean_maes, key=mean_maes.__getitem__)
+    log.info(
+        f'[alpha] {position}: best alpha={best_alpha} '
+        f'(mean MAE={mean_maes[best_alpha]:.4f})'
+    )
+
+    # Persist results (append if file exists)
+    result_df = pd.DataFrame(records)
+    if _ALPHA_LOG.exists():
+        existing = pd.read_csv(_ALPHA_LOG)
+        # Remove stale rows for same position before appending
+        existing = existing[existing['position'] != position]
+        result_df = pd.concat([existing, result_df], ignore_index=True)
+    _ALPHA_LOG.parent.mkdir(parents=True, exist_ok=True)
+    result_df.to_csv(_ALPHA_LOG, index=False)
+    log.info(f'[alpha] Results saved to {_ALPHA_LOG}')
+
+    return best_alpha
+
+
 def _train_tabular(
     spec,
     df: pd.DataFrame,
@@ -63,18 +134,24 @@ def _train_tabular(
     position: str,
     cv_metrics: pd.DataFrame | None = None,
     tune: bool = False,
+    alpha_search: bool = False,
 ) -> None:
     """
     Build a tabular model on the full dataset and serialise the bundle.
 
     For lgbm with tune=True, runs Optuna on the last CV fold to find best
     hyperparameters, then retrains on all data with those params.
+
+    For ridge with alpha_search=True, runs 3-fold CV over _ALPHA_GRID and
+    retrains with the best alpha.
     """
     X = df[feat_cols]
     y = df['total_points']
     s = df['season_id']
 
     extra_params: dict | None = None
+    ridge_alpha = 1.0
+
     if spec.name == 'lgbm' and tune:
         log.info(f'[train] {position}/lgbm: running Optuna on fold 3 ...')
         from ml.evaluate import CV_FOLDS, split_fold, _tune_lgbm
@@ -88,13 +165,20 @@ def _train_tabular(
         log.info(f'[train] {position}/lgbm: best tuned params {tuned}')
         extra_params = tuned
 
-    bundle = spec.build_fn(
-        X, y, position,
-        sid_train=s,
-        tune=tune,
-        extra_params=extra_params,
-        _train_df=df,
-    )
+    if spec.name == 'ridge' and alpha_search:
+        ridge_alpha = _search_ridge_alpha(df, feat_cols, position)
+        log.info(f'[train] {position}/ridge: using alpha={ridge_alpha}')
+
+    build_kwargs: dict = {
+        'sid_train':    s,
+        'tune':         tune,
+        'extra_params': extra_params,
+        '_train_df':    df,
+    }
+    if spec.name == 'ridge':
+        build_kwargs['alpha'] = ridge_alpha
+
+    bundle = spec.build_fn(X, y, position, **build_kwargs)
     bundle['model_name'] = spec.name
     bundle['position']   = position
     _save(position, spec.name, bundle, df, cv_metrics)
@@ -172,6 +256,7 @@ def train_position(
     models: tuple[str, ...] | None = None,
     eval_first: bool = False,
     tune: bool = False,
+    alpha_search: bool = False,
 ) -> None:
     """Train all requested models for one position."""
     registry = get_registry()
@@ -210,12 +295,14 @@ def train_position(
                 f'(they require OOF base model predictions). Use ml.evaluate for CV results.'
             )
             continue
-        _train_tabular(spec, df, feat_cols, position, cv_metrics, tune=tune)
+        _train_tabular(spec, df, feat_cols, position, cv_metrics, tune=tune,
+                       alpha_search=alpha_search)
 
 
 def train_all(
     eval_first: bool = False,
     tune: bool = False,
+    alpha_search: bool = False,
 ) -> None:
     """Train all registered tabular models for all positions."""
     log.info('Training all positions: ' + ', '.join(VALID_POSITIONS))
@@ -223,7 +310,7 @@ def train_all(
         log.info(f'\n{"="*60}')
         log.info(f'Position: {position}')
         log.info('='*60)
-        train_position(position, eval_first=eval_first, tune=tune)
+        train_position(position, eval_first=eval_first, tune=tune, alpha_search=alpha_search)
     log.info(f'\n[done] All models serialised to {MODELS_DIR}')
 
 
@@ -348,6 +435,9 @@ def _parse_args() -> argparse.Namespace:
                    help='Run CV evaluation before training')
     p.add_argument('--tune', action='store_true',
                    help='Optuna tuning for LightGBM (uses fold 3 for search)')
+    p.add_argument('--alpha-search', action='store_true',
+                   help='Grid search over Ridge alpha values [0.1,0.5,1.0,5.0,10.0] '
+                        'using 3-fold CV; selects best alpha before training')
     p.add_argument('--meta', action='store_true',
                    help='Train meta-models only (simple_avg, stacking, blending) '
                         'from OOF parquets in logs/training/')
@@ -357,8 +447,9 @@ def _parse_args() -> argparse.Namespace:
 
 
 if __name__ == '__main__':
-    args   = _parse_args()
-    models = (args.model,) if args.model else None
+    args         = _parse_args()
+    models       = (args.model,) if args.model else None
+    alpha_search = args.alpha_search
 
     if args.meta:
         if args.position:
@@ -368,10 +459,11 @@ if __name__ == '__main__':
     elif args.train_all:
         if args.position:
             train_position(args.position, models=models,
-                           eval_first=args.eval_first, tune=args.tune)
+                           eval_first=args.eval_first, tune=args.tune,
+                           alpha_search=alpha_search)
             train_meta_position(args.position)
         else:
-            train_all(eval_first=args.eval_first, tune=args.tune)
+            train_all(eval_first=args.eval_first, tune=args.tune, alpha_search=alpha_search)
             train_meta_all()
     else:
         if args.position:
@@ -380,6 +472,7 @@ if __name__ == '__main__':
                 models=models,
                 eval_first=args.eval_first,
                 tune=args.tune,
+                alpha_search=alpha_search,
             )
         else:
-            train_all(eval_first=args.eval_first, tune=args.tune)
+            train_all(eval_first=args.eval_first, tune=args.tune, alpha_search=alpha_search)

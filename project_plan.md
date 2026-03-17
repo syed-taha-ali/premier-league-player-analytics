@@ -17,7 +17,7 @@
 | 5 | Modelling |  Complete |
 | 6 | Evaluation |  Complete |
 | 7 | Interactive Dashboard & Visualisations |  Not started |
-| 8 | Deployment |  Not started |
+| 8 | Deployment |  Complete |
 | 9 | Monitoring |  Not started |
 
 ---
