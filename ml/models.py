@@ -428,6 +428,274 @@ _register(ModelSpec(
     predict_fn=_predict_scaled_linear,
 ))
 
+# ---------------------------------------------------------------------------
+# Shared helper: impute only (no scaling) for sklearn tree ensembles (Batch 2)
+# ---------------------------------------------------------------------------
+
+def _build_imputed_tree(
+    estimator,
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    position: str,
+    X_val: pd.DataFrame | None = None,
+    y_val: pd.Series | None = None,
+    sid_train: pd.Series | None = None,
+    sid_val: pd.Series | None = None,
+) -> dict:
+    """
+    Generic builder for tree models that need stratified mean imputation
+    but no feature scaling (RandomForest, ExtraTrees).
+    Fits and predicts with numpy arrays so sklearn does not store feature
+    names and predict() does not raise a feature-name mismatch warning.
+    """
+    from ml.evaluate import stratified_impute
+
+    if X_val is not None and sid_val is not None:
+        X_tr_f, X_v_f, season_means, global_means = stratified_impute(
+            X_train, X_val, sid_train, sid_val
+        )
+    else:
+        X_tr_f, _, season_means, global_means = stratified_impute(
+            X_train, X_train, sid_train, sid_train
+        )
+        X_v_f = None
+
+    estimator.fit(X_tr_f.values, y_train.values)
+
+    preds = None
+    if X_v_f is not None:
+        preds = estimator.predict(X_v_f.values)
+
+    return {
+        'model':        estimator,
+        'season_means': season_means,
+        'global_means': global_means,
+        'feature_cols': list(X_train.columns),
+        'preds':        preds,
+    }
+
+
+def _predict_imputed_tree(
+    bundle: dict,
+    X: pd.DataFrame,
+    sid: pd.Series | None = None,
+    **kwargs,
+) -> np.ndarray:
+    """Shared inference for imputed tree models (RF, ExtraTrees)."""
+    feat_cols    = bundle['feature_cols']
+    season_means = bundle['season_means']
+    global_means = bundle['global_means']
+    model        = bundle['model']
+
+    X_aligned = X[feat_cols].reset_index(drop=True)
+    X_arr     = X_aligned.values.astype(float)
+    gm        = global_means[feat_cols].values
+
+    if sid is not None:
+        s_vals = sid.reset_index(drop=True).values
+        fill   = np.empty_like(X_arr)
+        for i, s in enumerate(s_vals):
+            if s in season_means.index:
+                fill[i] = season_means.loc[s, feat_cols].values
+            else:
+                fill[i] = gm
+        fill = np.where(np.isnan(fill), gm, fill)
+    else:
+        fill = np.tile(gm, (len(X_arr), 1))
+
+    nan_mask = np.isnan(X_arr)
+    X_filled = np.where(nan_mask, fill, X_arr)
+    X_filled = np.where(np.isnan(X_filled), gm, X_filled)
+    return model.predict(X_filled)
+
+
+def _predict_no_preproc(
+    bundle: dict,
+    X: pd.DataFrame,
+    sid: pd.Series | None = None,
+    **kwargs,
+) -> np.ndarray:
+    """Shared inference for native-NaN models (XGBoost, HistGB, CatBoost)."""
+    return bundle['model'].predict(X[bundle['feature_cols']])
+
+
+# ---------------------------------------------------------------------------
+# Batch 2: gradient boosting expansion + sklearn tree ensembles
+# ---------------------------------------------------------------------------
+
+_XGB_BASE_PARAMS: dict[str, dict] = {
+    'GK':  dict(max_depth=3, learning_rate=0.05, n_estimators=200, subsample=0.8),
+    'DEF': dict(max_depth=5, learning_rate=0.05, n_estimators=300, subsample=0.8),
+    'MID': dict(max_depth=5, learning_rate=0.05, n_estimators=300, subsample=0.8),
+    'FWD': dict(max_depth=5, learning_rate=0.05, n_estimators=300, subsample=0.8),
+}
+
+_XGB_COMMON = dict(
+    tree_method='hist',
+    random_state=42,
+    n_jobs=-1,
+    verbosity=0,
+)
+
+
+def _build_xgb(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    position: str,
+    X_val: pd.DataFrame | None = None,
+    y_val: pd.Series | None = None,
+    sid_train: pd.Series | None = None,
+    sid_val: pd.Series | None = None,
+    **kwargs,
+) -> dict:
+    from xgboost import XGBRegressor
+    params = {**_XGB_BASE_PARAMS[position], **_XGB_COMMON}
+    model  = XGBRegressor(**params)
+    model.fit(X_train, y_train)
+    preds = model.predict(X_val) if X_val is not None else None
+    return {
+        'model':        model,
+        'feature_cols': list(X_train.columns),
+        'params':       params,
+        'preds':        preds,
+    }
+
+
+def _build_random_forest(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    position: str,
+    X_val: pd.DataFrame | None = None,
+    y_val: pd.Series | None = None,
+    sid_train: pd.Series | None = None,
+    sid_val: pd.Series | None = None,
+    **kwargs,
+) -> dict:
+    from sklearn.ensemble import RandomForestRegressor
+    estimator = RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1)
+    return _build_imputed_tree(
+        estimator, X_train, y_train, position, X_val, y_val, sid_train, sid_val
+    )
+
+
+def _build_extra_trees(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    position: str,
+    X_val: pd.DataFrame | None = None,
+    y_val: pd.Series | None = None,
+    sid_train: pd.Series | None = None,
+    sid_val: pd.Series | None = None,
+    **kwargs,
+) -> dict:
+    from sklearn.ensemble import ExtraTreesRegressor
+    estimator = ExtraTreesRegressor(n_estimators=200, random_state=42, n_jobs=-1)
+    return _build_imputed_tree(
+        estimator, X_train, y_train, position, X_val, y_val, sid_train, sid_val
+    )
+
+
+def _build_hist_gb(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    position: str,
+    X_val: pd.DataFrame | None = None,
+    y_val: pd.Series | None = None,
+    sid_train: pd.Series | None = None,
+    sid_val: pd.Series | None = None,
+    **kwargs,
+) -> dict:
+    from sklearn.ensemble import HistGradientBoostingRegressor
+    model = HistGradientBoostingRegressor(random_state=42)
+    model.fit(X_train, y_train)
+    preds = model.predict(X_val) if X_val is not None else None
+    return {
+        'model':        model,
+        'feature_cols': list(X_train.columns),
+        'preds':        preds,
+    }
+
+
+def _build_catboost(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    position: str,
+    X_val: pd.DataFrame | None = None,
+    y_val: pd.Series | None = None,
+    sid_train: pd.Series | None = None,
+    sid_val: pd.Series | None = None,
+    **kwargs,
+) -> dict:
+    from catboost import CatBoostRegressor
+    model = CatBoostRegressor(
+        iterations=300, learning_rate=0.05, depth=6,
+        random_seed=42, verbose=0,
+    )
+    model.fit(X_train, y_train)
+    preds = model.predict(X_val) if X_val is not None else None
+    return {
+        'model':        model,
+        'feature_cols': list(X_train.columns),
+        'preds':        preds,
+    }
+
+
+# Batch 2 registrations --------------------------------------------------
+
+_register(ModelSpec(
+    name='xgb',
+    family='tabular',
+    tier=2,
+    requires_imputation=False,
+    requires_scaling=False,
+    build_fn=_build_xgb,
+    predict_fn=_predict_no_preproc,
+))
+
+_register(ModelSpec(
+    name='random_forest',
+    family='tabular',
+    tier=2,
+    requires_imputation=True,
+    requires_scaling=False,
+    build_fn=_build_random_forest,
+    predict_fn=_predict_imputed_tree,
+))
+
+_register(ModelSpec(
+    name='extra_trees',
+    family='tabular',
+    tier=3,
+    requires_imputation=True,
+    requires_scaling=False,
+    build_fn=_build_extra_trees,
+    predict_fn=_predict_imputed_tree,
+))
+
+_register(ModelSpec(
+    name='hist_gb',
+    family='tabular',
+    tier=3,
+    requires_imputation=False,
+    requires_scaling=False,
+    build_fn=_build_hist_gb,
+    predict_fn=_predict_no_preproc,
+))
+
+try:
+    import catboost as _catboost_mod  # noqa: F401
+    _register(ModelSpec(
+        name='catboost',
+        family='tabular',
+        tier=3,
+        requires_imputation=False,
+        requires_scaling=False,
+        build_fn=_build_catboost,
+        predict_fn=_predict_no_preproc,
+    ))
+except ImportError:
+    pass
+
 
 # ---------------------------------------------------------------------------
 # Public API

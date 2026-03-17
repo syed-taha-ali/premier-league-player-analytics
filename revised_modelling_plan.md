@@ -36,17 +36,17 @@ per-model bundle specs, and verification gates) see `revised_modelling_implement
 | Model | Description | Tier | Status |
 |-------|-------------|:----:|--------|
 | Decision Tree | Single CART tree | Not recommended | Not implemented |
-| Random Forest | Bagging of trees | 2 | Not implemented |
-| Extra Trees | Random splits + bagging | 3 | Not implemented |
+| Random Forest | Bagging of trees | 2 | Implemented |
+| Extra Trees | Random splits + bagging | 3 | Implemented |
 
 ### D — Gradient Boosting
 
 | Model | Description | Tier | Status |
 |-------|-------------|:----:|--------|
-| XGBoost | Gradient boosting with regularisation | 2 | Not implemented |
+| XGBoost | Gradient boosting with regularisation | 2 | Implemented |
 | LightGBM | Leaf-wise gradient boosting | 1 | Implemented |
 | CatBoost | Native categorical support | 3 | Not implemented |
-| HistGradientBoosting | sklearn histogram GB | 3 | Not implemented |
+| HistGradientBoosting | sklearn histogram GB | 3 | Implemented |
 
 ### E — Neural Networks
 
