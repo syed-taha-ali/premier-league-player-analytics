@@ -1,0 +1,25 @@
+{
+  "position": "FWD",
+  "model": "simple_avg",
+  "feature_cols": [
+    "ridge",
+    "xgb",
+    "elasticnet",
+    "lgbm"
+  ],
+  "train_seasons": [
+    8,
+    9,
+    10
+  ],
+  "n_train_rows": 3492,
+  "trained_at": "2026-03-17T21:06:58.968224+00:00",
+  "cv_mae_by_fold": [
+    2.2557,
+    2.4879,
+    2.257
+  ],
+  "cv_mae_mean": 2.3335,
+  "cv_rmse_mean": 3.1594,
+  "cv_spearman_mean": 0.3777
+}

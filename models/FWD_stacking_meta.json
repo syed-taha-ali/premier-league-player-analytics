@@ -1,0 +1,26 @@
+{
+  "position": "FWD",
+  "model": "stacking",
+  "feature_cols": [
+    "ridge",
+    "xgb",
+    "elasticnet",
+    "lgbm",
+    "random_forest"
+  ],
+  "train_seasons": [
+    8,
+    9,
+    10
+  ],
+  "n_train_rows": 3492,
+  "trained_at": "2026-03-17T21:06:58.971729+00:00",
+  "cv_mae_by_fold": [
+    2.295,
+    2.5041,
+    2.3305
+  ],
+  "cv_mae_mean": 2.3765,
+  "cv_rmse_mean": 3.1585,
+  "cv_spearman_mean": 0.3841
+}

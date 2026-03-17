@@ -1,0 +1,25 @@
+{
+  "position": "DEF",
+  "model": "blending",
+  "feature_cols": [
+    "ridge",
+    "bayesian_ridge",
+    "poisson_glm",
+    "mlp"
+  ],
+  "train_seasons": [
+    8,
+    9,
+    10
+  ],
+  "n_train_rows": 9990,
+  "trained_at": "2026-03-17T21:06:58.916819+00:00",
+  "cv_mae_by_fold": [
+    2.0973,
+    2.0227,
+    2.2417
+  ],
+  "cv_mae_mean": 2.1206,
+  "cv_rmse_mean": 2.9042,
+  "cv_spearman_mean": 0.2676
+}
