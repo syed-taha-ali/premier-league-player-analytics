@@ -466,6 +466,8 @@ def run_cv(
         for name, bundle in fold_bundles.items():
             if bundle.get('preds') is not None:
                 fold_pred[f'pred_{name}'] = bundle['preds']
+            if bundle.get('pred_std') is not None:
+                fold_pred[f'pred_std_{name}'] = bundle['pred_std']
         all_preds.append(fold_pred)
 
         # Keep fold 3 models for diagnostics / final serialisation reference

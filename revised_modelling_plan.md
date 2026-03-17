@@ -15,7 +15,7 @@ per-model bundle specs, and verification gates) see `revised_modelling_implement
 
 | Model | Description | Tier | Status |
 |-------|-------------|:----:|--------|
-| Position mean | Mean pts by position x home/away | 1 | Not implemented |
+| Position mean | Mean pts by position x home/away | 1 | Implemented |
 | Rolling N-GW mean | Last 3 or 5 GWs | 1 | Implemented |
 | FDR-adjusted mean | Rolling mean x opponent difficulty multiplier | 2 | Not implemented |
 | Last season avg | Prior season pts/GW | 2 | Not implemented |
@@ -26,8 +26,8 @@ per-model bundle specs, and verification gates) see `revised_modelling_implement
 |-------|-------------|:----:|--------|
 | OLS Linear Regression | Standard least-squares | Not recommended | Not implemented |
 | Ridge Regression | OLS + L2 penalty | 1 | Implemented |
-| Lasso Regression | OLS + L1 penalty | 3 | Not implemented |
-| ElasticNet | L1 + L2 combined | 2 | Not implemented |
+| Lasso Regression | OLS + L1 penalty | 3 | Implemented |
+| ElasticNet | L1 + L2 combined | 2 | Implemented |
 | Polynomial + Ridge | Degree-2 interactions + Ridge | 3 | Not implemented |
 | Poisson GLM | GLM with log link | 2 | Not implemented |
 
@@ -62,7 +62,7 @@ per-model bundle specs, and verification gates) see `revised_modelling_implement
 
 | Model | Description | Tier | Status |
 |-------|-------------|:----:|--------|
-| Bayesian Ridge | Ridge with Bayesian priors | 2 | Not implemented |
+| Bayesian Ridge | Ridge with Bayesian priors | 2 | Implemented |
 | Gaussian Process Regression | Non-parametric Bayesian | Not recommended | Not implemented |
 | Zero-Inflated Poisson | Poisson with excess-zero component | Not recommended | Not implemented |
 
