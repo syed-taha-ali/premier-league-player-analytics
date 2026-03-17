@@ -235,6 +235,16 @@ Feature applicability by position:
 
 ## Phase 5 — Modelling
 
+> **Note:** `revised_modelling_plan.md` (root of this repository) extends and revises
+> §5.1 and §5.2 of this phase. It assigns tiers to all models in the brainstorm,
+> provides updated rationale for every assignment, and defines a full priority-ordered
+> implementation roadmap. Refer to that document for all future modelling decisions.
+> This section remains the authoritative record of what was implemented in Tier 1.
+>
+> `revised_modelling_implementation_plan.md` (root of this repository) defines the
+> technical implementation strategy for all remaining models: the registry architecture,
+> batch sequencing, per-model bundle specs, and verification gates.
+
 **Status: Complete.**
 
 **Deliverables:**

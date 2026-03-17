@@ -29,15 +29,12 @@ import pandas as pd
 from ml.features import build_feature_matrix, VALID_POSITIONS
 from ml.evaluate import (
     get_feature_cols,
-    stratified_impute,
-    build_ridge,
-    build_lgbm,
     run_cv,
     summarise_cv,
     beats_baseline,
-    LGBM_BASE_PARAMS,
     LOGS_DIR,
 )
+from ml.models import get_registry, get_model, tabular_models
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,91 +43,55 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-_HERE    = Path(__file__).parent.parent
+_HERE      = Path(__file__).parent.parent
 MODELS_DIR = _HERE / 'models'
-VALID_MODELS = ('baseline', 'ridge', 'lgbm')
 
 
 # ---------------------------------------------------------------------------
-# Model training on full dataset
+# Generic tabular model trainer
 # ---------------------------------------------------------------------------
 
-def train_baseline(
-    df: pd.DataFrame,
-    feat_cols: list[str],
-    position: str,
-    cv_metrics: pd.DataFrame | None = None,
-) -> None:
-    """
-    Baseline 'model': just stores the training mean of pts_rolling_5gw as fallback.
-    At inference, predict = pts_rolling_5gw; NaN -> stored mean.
-    """
-    fallback_mean = float(df['total_points'].mean())
-    bundle = {
-        'model_name':    'baseline',
-        'position':      position,
-        'feature_cols':  feat_cols,
-        'fallback_mean': fallback_mean,
-    }
-    _save(position, 'baseline', bundle, df, cv_metrics)
-
-
-def train_ridge(
-    df: pd.DataFrame,
-    feat_cols: list[str],
-    position: str,
-    cv_metrics: pd.DataFrame | None = None,
-    alpha: float = 1.0,
-) -> None:
-    """
-    Train Ridge on all xG era data. Imputation fit on full training set.
-    """
-    X = df[feat_cols]
-    y = df['total_points']
-    s = df['season_id']
-
-    bundle = build_ridge(X, y, s, alpha=alpha)
-    bundle['model_name'] = 'ridge'
-    bundle['position']   = position
-
-    _save(position, 'ridge', bundle, df, cv_metrics)
-
-
-def train_lgbm(
+def _train_tabular(
+    spec,
     df: pd.DataFrame,
     feat_cols: list[str],
     position: str,
     cv_metrics: pd.DataFrame | None = None,
     tune: bool = False,
-    extra_params: dict | None = None,
 ) -> None:
     """
-    Train LightGBM on all xG era data.
-    If tune=True, run Optuna on the last CV fold (fold 3) to find best hyperparams,
-    then retrain on all data with those params.
+    Build a tabular model on the full dataset and serialise the bundle.
+
+    For lgbm with tune=True, runs Optuna on the last CV fold to find best
+    hyperparameters, then retrains on all data with those params.
     """
     X = df[feat_cols]
     y = df['total_points']
+    s = df['season_id']
 
-    tuned_params: dict | None = None
-    if tune:
-        log.info(f'[train_lgbm] {position}: running Optuna on fold 3 ...')
+    extra_params: dict | None = None
+    if spec.name == 'lgbm' and tune:
+        log.info(f'[train] {position}/lgbm: running Optuna on fold 3 ...')
         from ml.evaluate import CV_FOLDS, split_fold, _tune_lgbm
         train_seasons, val_season = CV_FOLDS[-1]
         train_df, val_df = split_fold(df, train_seasons, val_season)
-        X_tr = train_df[feat_cols]
-        y_tr = train_df['total_points']
-        X_v  = val_df[feat_cols]
-        y_v  = val_df['total_points']
-        tuned_params = _tune_lgbm(X_tr, y_tr, X_v, y_v, position)
-        log.info(f'[train_lgbm] {position}: best tuned params {tuned_params}')
+        tuned = _tune_lgbm(
+            train_df[feat_cols], train_df['total_points'],
+            val_df[feat_cols],   val_df['total_points'],
+            position,
+        )
+        log.info(f'[train] {position}/lgbm: best tuned params {tuned}')
+        extra_params = tuned
 
-    combined_extra = {**(tuned_params or {}), **(extra_params or {})}
-    bundle = build_lgbm(X, y, position, extra_params=combined_extra if combined_extra else None)
-    bundle['model_name'] = 'lgbm'
+    bundle = spec.build_fn(
+        X, y, position,
+        sid_train=s,
+        tune=tune,
+        extra_params=extra_params,
+    )
+    bundle['model_name'] = spec.name
     bundle['position']   = position
-
-    _save(position, 'lgbm', bundle, df, cv_metrics)
+    _save(position, spec.name, bundle, df, cv_metrics)
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +152,8 @@ def _load_cv_metrics(position: str) -> pd.DataFrame | None:
     path = LOGS_DIR / f'cv_metrics_{position}.csv'
     if path.exists():
         df = pd.read_csv(path)
-        return df[df['model'].isin(['baseline', 'ridge', 'lgbm'])]
+        model_names = list(get_registry().keys())
+        return df[df['model'].isin(model_names)]
     return None
 
 
@@ -201,11 +163,20 @@ def _load_cv_metrics(position: str) -> pd.DataFrame | None:
 
 def train_position(
     position: str,
-    models: tuple[str, ...] = VALID_MODELS,
+    models: tuple[str, ...] | None = None,
     eval_first: bool = False,
     tune: bool = False,
 ) -> None:
     """Train all requested models for one position."""
+    registry = get_registry()
+    if models is None:
+        model_names = [n for n, s in registry.items() if s.family == 'tabular']
+    else:
+        model_names = list(models)
+        for name in model_names:
+            if name not in registry:
+                raise ValueError(f'Unknown model "{name}". Available: {sorted(registry)}')
+
     if eval_first:
         log.info(f'[eval_first] Running CV for {position} ...')
         metrics_df, _, _ = run_cv(position)
@@ -224,23 +195,17 @@ def train_position(
     log.info(f'[train] {position}: {len(df):,} rows, {len(feat_cols)} features, '
              f'seasons {sorted(df["season_id"].unique().tolist())}')
 
-    for model_name in models:
+    for model_name in model_names:
         log.info(f'[train] {position}/{model_name} ...')
-        if model_name == 'baseline':
-            train_baseline(df, feat_cols, position, cv_metrics)
-        elif model_name == 'ridge':
-            train_ridge(df, feat_cols, position, cv_metrics)
-        elif model_name == 'lgbm':
-            train_lgbm(df, feat_cols, position, cv_metrics, tune=tune)
-        else:
-            log.warning(f'Unknown model "{model_name}", skipping')
+        spec = get_model(model_name)
+        _train_tabular(spec, df, feat_cols, position, cv_metrics, tune=tune)
 
 
 def train_all(
     eval_first: bool = False,
     tune: bool = False,
 ) -> None:
-    """Train all Tier 1 models for all positions."""
+    """Train all registered tabular models for all positions."""
     log.info('Training all positions: ' + ', '.join(VALID_POSITIONS))
     for position in VALID_POSITIONS:
         log.info(f'\n{"="*60}')
@@ -258,7 +223,7 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description='FPL Phase 5 final model training')
     p.add_argument('--position', choices=list(VALID_POSITIONS),
                    help='Train for one position only (default: all)')
-    p.add_argument('--model', choices=list(VALID_MODELS),
+    p.add_argument('--model', choices=sorted(get_registry()),
                    help='Train one model only (default: all)')
     p.add_argument('--eval-first', action='store_true',
                    help='Run CV evaluation before training')
@@ -269,7 +234,7 @@ def _parse_args() -> argparse.Namespace:
 
 if __name__ == '__main__':
     args = _parse_args()
-    models = (args.model,) if args.model else VALID_MODELS
+    models = (args.model,) if args.model else None
 
     if args.position:
         train_position(
