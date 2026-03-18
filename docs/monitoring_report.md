@@ -31,7 +31,15 @@ Thresholds are 1.5 x the CV baseline MAE (rolling-mean baseline, Phase 6):
 | FWD | 2.406 | 3.609 |
 
 Alerts trigger a WARNING log line. No automatic retraining is initiated -- the
-operator reviews the rolling trend before deciding to retrain.
+operator reviews the rolling trend before deciding to retrain. Retraining should
+be triggered only on confirmed performance degradation (a sustained rolling MAE
+above threshold across multiple GWs), not on a single-GW spike.
+
+The threshold values were seeded from Phase 5/6 CV results and are stored inline
+on every row of `monitoring_log.csv` (the `threshold` column). They are not
+stored as a separate seed record; the `_THRESHOLDS` dict in `run_gw.py` is the
+authoritative source and must be updated manually after end-of-season retraining
+if baseline MAE shifts by more than 5%.
 
 ### 1.3 Current monitoring status
 
@@ -75,10 +83,14 @@ The `EXPECTED_COLS` dict in `etl/schema.py` is built from era flags in `SEASONS`
 | Manager era | 9 (2024-25) | + mng_* |
 | Defensive era | 10 (2025-26) | + clearances_blocks_interceptions, defensive_contribution, recoveries, tackles, starts, mng_* (NULL columns retained in CSV) |
 
-When FPL adds a new column group in a future season, the operator should:
-1. Add the new season row to `SEASONS` in `etl/schema.py` with correct era flags
-2. Add the column frozenset constant (e.g. `_NEW_COLS`) and update the loop
-3. Run `python -m etl.run` to validate the new schema
+When a schema alert fires, the operator should:
+1. Inspect `logs/monitoring/schema_alerts.csv` to identify the new or dropped columns
+2. Update `etl/schema.py`: add the new season row to `SEASONS` with correct era flags,
+   and add the column frozenset constant (e.g. `_NEW_COLS`) to the `EXPECTED_COLS` loop
+3. Update `ml/features.py`: add or remove feature derivations that depend on the new columns
+4. Update `project_plan.md`: record the new era in the GW Schema Eras table and any
+   affected Phase 4/5 key decisions
+5. Run `python -m etl.run` to validate the updated schema
 
 ### 2.3 Schema alerts log
 
@@ -99,6 +111,10 @@ At the end of each `run_gw.py` monitoring step, `_write_gw_eval_report()`
 produces a markdown file with a structured narrative for operator review.
 
 **Output path:** `logs/monitoring/gw{N}_s{season}_eval.md`
+
+Note: `project_plan.md §9.4` specifies `gw{N}_eval.md`. The implementation uses
+`gw{N}_s{season}_eval.md` to avoid filename collisions when running multiple seasons
+(e.g. GW 1 of season 10 and GW 1 of season 11). The season suffix is the only deviation.
 
 ### 3.2 Report structure
 
