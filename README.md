@@ -146,5 +146,15 @@ Full rationale in `project_plan.md` and `docs/`.
 
 ## Data source
 
-Raw FPL data sourced from
-[vaastav/Fantasy-Premier-League](https://github.com/vaastav/Fantasy-Premier-League).
+Raw FPL data sourced from the
+[vaastav/Fantasy-Premier-League](https://github.com/vaastav/Fantasy-Premier-League)
+dataset. Please cite the original work if you use this data:
+
+```
+@misc{anand2016fantasypremierleague,
+  title  = {{FPL Historical Dataset}},
+  author = {Anand, Vaastav},
+  year   = {2022},
+  howpublished = {Retrieved August 2022 from \url{https://github.com/vaastav/Fantasy-Premier-League/}}
+}
+```
