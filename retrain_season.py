@@ -39,6 +39,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pandas as pd
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s  %(levelname)-8s  %(message)s',
@@ -226,8 +228,6 @@ def _step_report(season: int, dry_run: bool) -> None:
         log.info(f'[dry-run] Would write {report_path}')
         return
 
-    import pandas as pd
-
     lines = [
         f'# Retraining Report -- Season {season}',
         '',
@@ -351,6 +351,7 @@ def retrain(season: int, skip_archive: bool, skip_etl: bool, dry_run: bool) -> N
 # ---------------------------------------------------------------------------
 
 def _parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the retraining script."""
     p = argparse.ArgumentParser(description='FPL end-of-season retraining pipeline')
     p.add_argument('--season', type=int, required=True,
                    help='New season ID being introduced (e.g. 11)')

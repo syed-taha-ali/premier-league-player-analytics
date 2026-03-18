@@ -49,6 +49,10 @@ with st.sidebar:
 season_in_clause = ", ".join(str(s) for s in sel_season_ids)
 season_labels_sel = [season_id_to_label.get(s, str(s)) for s in sel_season_ids]
 
+# Validate pos_filter before embedding in SQL — selectbox constrains values but be explicit.
+if pos_filter not in (["All"] + POSITIONS):
+    pos_filter = "All"
+
 # ---------------------------------------------------------------------------
 # Section A — Points Distribution
 # ---------------------------------------------------------------------------

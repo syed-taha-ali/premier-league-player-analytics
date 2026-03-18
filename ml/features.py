@@ -4,18 +4,18 @@ Feature engineering for FPL GW-level points prediction.
 Entry point: build_feature_matrix(position, era='xg')
 
 Builds a feature matrix for one position from db/fpl.db applying:
-  - Base filter (section 4.1 of project_plan.md): xG era (seasons 7-10),
+  - Base filter (section 4.1 of docs/project_plan.md): xG era (seasons 7-10),
     mng_win IS NULL, minutes > 0, position_label filtered, season_gw_count >= 5
   - Player rolling features within (player_code, season_id) only
   - Team match-level features derived from score columns (not goals_conceded,
     which reflects only time on pitch and is inconsistent across players)
   - Opponent season rank derived from end-of-season standings per season
   - Lag features for value and transfer activity
-  - Position-specific feature selection per section 4.6 of project_plan.md
+  - Position-specific feature selection per section 4.6 of docs/project_plan.md
 
 Banned features (leakage): bonus/bps/ict_index (same-GW post-match);
 clean_sheets/goals_scored/assists as same-GW values (use rolling lags only);
-transfers_in/out same-GW (lag by 1). See section 4.4 of project_plan.md.
+transfers_in/out same-GW (lag by 1). See section 4.4 of docs/project_plan.md.
 
 Caches to outputs/features/feature_matrix_{position}.parquet.
 """
@@ -39,7 +39,7 @@ VALID_POSITIONS = ('GK', 'DEF', 'MID', 'FWD')
 CONTEXT_COLS = ['season_id', 'gw', 'fixture_id', 'player_code', 'position_code', 'team_sk']
 TARGET_COL = 'total_points'
 
-# Per-position feature lists (sections 4.5 and 4.6 of project_plan.md).
+# Per-position feature lists (sections 4.5 and 4.6 of docs/project_plan.md).
 # team_goals_conceded_season and team_cs_rolling_3gw are included for GK/DEF only
 # (explains 46.6% variance in DEF/GK scoring).
 # xG/xA/xGI features are MID/FWD only.
@@ -262,7 +262,7 @@ def build_feature_matrix(
     -------
     pd.DataFrame
         One row per player-fixture with CONTEXT_COLS, total_points (target),
-        and position-specific features from section 4.5/4.6 of project_plan.md.
+        and position-specific features from section 4.5/4.6 of docs/project_plan.md.
         Cached to outputs/features/feature_matrix_{position}.parquet.
 
     Notes
@@ -308,6 +308,7 @@ def build_feature_matrix(
 # ---------------------------------------------------------------------------
 
 def _load_base_data(position: str) -> pd.DataFrame:
+    """Query fpl.db for one position's xG era rows using the base SQL + opponent rank CTE."""
     conn = sqlite3.connect(DB_PATH)
     df = pd.read_sql_query(_BASE_SQL, conn, params=(position, XG_ERA_MIN_SEASON))
     conn.close()

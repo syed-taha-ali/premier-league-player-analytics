@@ -49,6 +49,7 @@ def _insert(df: pd.DataFrame, table: str, conn: sqlite3.Connection) -> int:
 # ---------------------------------------------------------------------------
 
 def load_dim_season(conn: sqlite3.Connection) -> None:
+    """Insert one row per season into dim_season from the SEASONS constant."""
     rows = []
     for sid, label, sy, ey, gws, pos, xp, xg, starts, mng, src in SEASONS:
         rows.append({
@@ -67,6 +68,7 @@ def load_dim_season(conn: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------------------
 
 def load_dim_player(conn: sqlite3.Connection, data_root: Path) -> None:
+    """Load dim_player from players_raw.csv files — one stable row per player_code."""
     frames = []
     for sid, label, *_ in SEASONS:
         path = data_root / label / 'players_raw.csv'
@@ -110,6 +112,7 @@ def load_dim_player(conn: sqlite3.Connection, data_root: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def load_dim_team(conn: sqlite3.Connection, data_root: Path) -> None:
+    """Load dim_team, deriving team_sk from (season_id, team_id). Seasons 1–8 use master_team_list.csv; seasons 9–10 cross-join players_raw + merged_gw."""
     rows = []
 
     # --- Seasons 1–8: master_team_list.csv provides team_id + team_name ---
@@ -177,6 +180,7 @@ def load_dim_player_season(
     data_root: Path,
     history_costs: dict,  # (player_code, season_id) → {'start_cost', 'end_cost'}
 ) -> None:
+    """Load dim_player_season from players_raw.csv; join start/end costs from history_costs."""
     # Build lookup: (season_id, team_id) → team_sk
     team_sk_df = pd.read_sql("SELECT season_id, team_id, team_sk FROM dim_team", conn)
     team_sk_map = team_sk_df.set_index(['season_id', 'team_id'])['team_sk'].to_dict()
@@ -267,7 +271,7 @@ def scan_history(data_root: Path) -> pd.DataFrame:
                 df = _read_csv(hist_path)
                 df['source_season_id'] = sid
                 records.append(df)
-            except Exception as e:
+            except (ValueError, KeyError, pd.errors.ParserError) as e:
                 print(f"    Warning: {hist_path.name}: {e}")
 
     if not records:
@@ -312,6 +316,7 @@ def load_fact_player_season_history(
     conn: sqlite3.Connection,
     history_df: pd.DataFrame,
 ) -> None:
+    """Load fact_player_season_history from the pre-built history_df (players/*/history.csv)."""
     if history_df.empty:
         print("  fact_player_season_history: 0 rows (no history files found)")
         return
@@ -359,19 +364,25 @@ def load_fact_player_season_history(
 # 6. fact_gw_player
 # ---------------------------------------------------------------------------
 
-# All era-specific columns that may or may not appear in merged_gw.csv
+# All era-specific columns that may or may not appear in merged_gw.csv.
+# Each block corresponds to a schema era; columns absent from a given CSV are silently skipped.
 _OPTIONAL_GW_COLS = [
+    # Modern core era (2020-21+)
     'starts',
     'xP',  # renamed → xp
+    # xG era (2022-23+)
     'expected_goals', 'expected_assists',
     'expected_goal_involvements', 'expected_goals_conceded',
     'modified',
+    # Old Opta era (2016-17 to 2018-19)
     'big_chances_created', 'big_chances_missed', 'key_passes',
     'completed_passes', 'attempted_passes', 'dribbles', 'fouls', 'offside',
     'errors_leading_to_goal', 'errors_leading_to_goal_attempt',
     'open_play_crosses', 'target_missed', 'winning_goals',
+    # Defensive era (2025-26+)
     'clearances_blocks_interceptions', 'recoveries', 'tackles',
     'defensive_contribution',
+    # Manager era (2024-25)
     'mng_win', 'mng_draw', 'mng_loss', 'mng_goals_scored',
     'mng_clean_sheets', 'mng_underdog_win', 'mng_underdog_draw',
 ]
@@ -385,6 +396,7 @@ _COUNTING_COLS = [
 
 
 def load_fact_gw_player(conn: sqlite3.Connection, data_root: Path) -> None:
+    """Load fact_gw_player from merged_gw.csv for each season; resolve team_sk and position_label."""
     # Build lookup tables from already-loaded dims
     team_sk_df = pd.read_sql("SELECT season_id, team_id, team_sk FROM dim_team", conn)
     team_sk_map = team_sk_df.set_index(['season_id', 'team_id'])['team_sk'].to_dict()

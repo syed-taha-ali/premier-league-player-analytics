@@ -28,6 +28,7 @@ DB_PATH   = Path(__file__).parent.parent / 'db' / 'fpl.db'
 
 
 def create_schema(conn: sqlite3.Connection) -> None:
+    """Execute the DDL string against conn, creating all tables and indices."""
     # SQLite doesn't support executing multiple statements in execute(),
     # so split on ';' and run each statement individually.
     for stmt in DDL.split(';'):
@@ -38,6 +39,7 @@ def create_schema(conn: sqlite3.Connection) -> None:
 
 
 def main() -> None:
+    """Drop and rebuild fpl.db from scratch, then run all validation checks."""
     DB_PATH.parent.mkdir(exist_ok=True)
 
     # Remove existing DB so we start clean on each run
@@ -48,7 +50,7 @@ def main() -> None:
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
-    conn.execute("PRAGMA cache_size = -65536")  # 64 MB page cache
+    conn.execute("PRAGMA cache_size = -65536")  # negative = kibibytes; -65536 = 64 MiB
     conn.execute("PRAGMA foreign_keys = ON")
 
     t0 = time.perf_counter()

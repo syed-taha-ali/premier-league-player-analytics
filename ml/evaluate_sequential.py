@@ -203,6 +203,7 @@ def _train_epoch(
     optimizer: torch.optim.Optimizer,
     criterion: nn.Module,
 ) -> float:
+    """Run one training epoch; return mean masked loss per valid timestep."""
     model.train()
     total_loss = 0.0
     total_n    = 0
@@ -249,6 +250,7 @@ def _compute_metrics(
     position: str,
     fold: int,
 ) -> dict:
+    """Compute MAE, RMSE, R², Spearman, and top-10 precision; return as a record dict."""
     mae  = mean_absolute_error(y_true, y_pred)
     rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
     r2   = r2_score(y_true, y_pred)
@@ -384,12 +386,14 @@ def run_sequential_cv(
 # -------------------------------------------------------------------------
 
 def _save_metrics(df: pd.DataFrame, position: str) -> None:
+    """Save sequential CV metrics to logs/training/cv_metrics_{position}_seq.csv."""
     out = LOGS_DIR / f'cv_metrics_{position}_seq.csv'
     df.to_csv(out, index=False)
     log.info(f'[save] {out}')
 
 
 def _summarise(df: pd.DataFrame) -> pd.DataFrame:
+    """Return mean metrics per model across all folds."""
     return (
         df.groupby('model')[['mae', 'rmse', 'r2', 'spearman', 'top10_prec']]
         .mean()
@@ -398,6 +402,7 @@ def _summarise(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _compare_with_tabular(position: str, seq_summary: pd.DataFrame) -> None:
+    """Print side-by-side sequential vs tabular (ridge, lgbm) mean CV metrics."""
     tab_path = LOGS_DIR / f'cv_metrics_{position}.csv'
     if not tab_path.exists():
         log.warning(f'No tabular CV metrics at {tab_path}; cannot compare')
@@ -476,6 +481,7 @@ def _gate_summary(
 # -------------------------------------------------------------------------
 
 def _parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the sequential CV evaluation script."""
     p = argparse.ArgumentParser(description='FPL sequential model CV (LSTM/GRU)')
     p.add_argument(
         '--position', choices=list(VALID_POSITIONS) + ['all'],

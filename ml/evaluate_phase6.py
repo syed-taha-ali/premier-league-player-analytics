@@ -63,10 +63,12 @@ JOIN_KEYS = ['season_id', 'gw', 'fixture_id', 'player_code']
 # ---------------------------------------------------------------------------
 
 def load_oof(position: str) -> pd.DataFrame:
+    """Load OOF predictions parquet for the given position."""
     return pd.read_parquet(LOGS_DIR / f'cv_preds_{position}.parquet')
 
 
 def load_cv_metrics(position: str) -> pd.DataFrame:
+    """Load CV metrics CSV for the given position."""
     return pd.read_csv(LOGS_DIR / f'cv_metrics_{position}.csv')
 
 
@@ -106,6 +108,7 @@ def join_features(oof: pd.DataFrame, feat: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def assign_minutes_bucket(minutes: np.ndarray) -> np.ndarray:
+    """Map per-player minutes to a 3-bucket string label: Starter / Rotation / Cameo."""
     out = np.full(len(minutes), 'Starter (60+)', dtype=object)
     out[minutes < 60] = 'Rotation (30-59)'
     out[minutes < 30] = 'Cameo (<30)'
@@ -127,6 +130,7 @@ def assign_price_band(value_lag1: pd.Series) -> pd.Categorical:
 # ---------------------------------------------------------------------------
 
 def metrics_row(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
+    """Compute MAE, RMSE, and Spearman rho for a stratum subset."""
     mae  = round(float(mean_absolute_error(y_true, y_pred)), 4)
     rmse = round(float(np.sqrt(np.mean((y_true - y_pred) ** 2))), 4)
     rho, _ = stats.spearmanr(y_true, y_pred)
@@ -315,6 +319,7 @@ def plot_learning_curves(all_cv_metrics: dict[str, pd.DataFrame]) -> None:
 # ---------------------------------------------------------------------------
 
 def _md_table(rows: dict, columns: tuple) -> str:
+    """Format a dict of {stratum: {col: value}} as a markdown table."""
     col_header = ' | '.join(columns)
     col_sep    = ' | '.join([':------:'] * len(columns))
     lines = [f'| Stratum | {col_header} |', f'|---------|{col_sep}|']
@@ -330,6 +335,7 @@ def write_report(
     resid_stats: dict,
     all_cv:      dict,
 ) -> None:
+    """Write the Phase 6 evaluation supplement markdown report to docs/."""
     lines = []
 
     lines += [
@@ -534,6 +540,7 @@ def write_report(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    """Run all Phase 6 stratifications, residual plots, learning curves, and write the report."""
     mins_all    = {}
     price_all   = {}
     resid_stats = {}

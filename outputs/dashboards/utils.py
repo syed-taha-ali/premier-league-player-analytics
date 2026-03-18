@@ -218,6 +218,7 @@ def load_fdr_calendar(season_id: int) -> pd.DataFrame:
 
     # FDR from opponent_season_rank: rank 1–6 = FDR 5 (hardest), 19–20 = FDR 1 (easiest)
     def _rank_to_fdr(rank: float) -> int:
+        """Map end-of-season opponent rank (1=best) to FDR score (5=hardest fixture)."""
         if rank <= 6:
             return 5
         if rank <= 10:

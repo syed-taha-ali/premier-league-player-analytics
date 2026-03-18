@@ -28,7 +28,13 @@ SEASONS = re.compile(r"^\d{4}-\d{2}$")
 
 
 def classify_file(path: Path) -> str:
-    """Return a logical file-type label for a CSV path."""
+    """
+    Return a logical file-type label for a CSV path.
+
+    Possible return values: 'ROOT/<name>', 'SEASON/<name>', 'GWS/merged_gw.csv',
+    'GWS/gw_N.csv', 'GWS/xP_N.csv', 'GWS/<name>', 'PLAYERS/gw.csv',
+    'PLAYERS/history.csv', 'PLAYERS/<name>', or 'OTHER/<dir>/<name>'.
+    """
     parts = path.parts
     name = path.name
 
@@ -71,16 +77,17 @@ def scan_files(root: Path) -> dict[str, list[Path]]:
 
 
 def read_safe(path: Path, nrows: int = 3) -> pd.DataFrame | None:
-    """Read CSV with fallback encodings; return None on failure."""
+    """Read CSV trying utf-8, latin-1, then cp1252 encodings; return None if all fail."""
     for enc in ("utf-8", "latin-1", "cp1252"):
         try:
             return pd.read_csv(path, nrows=nrows, encoding=enc, low_memory=False)
-        except Exception:
+        except (UnicodeDecodeError, pd.errors.ParserError, OSError):
             continue
     return None
 
 
 def season_of(path: Path) -> str:
+    """Return the season label (e.g. '2022-23') found in path.parts, or '—' if absent."""
     for part in path.parts:
         if SEASONS.match(part):
             return part
@@ -101,13 +108,15 @@ def representative_files(paths: list[Path]) -> list[Path]:
     return list(by_season.values())
 
 
-def hr(char="─", width=100):
+def hr(char: str = "─", width: int = 100) -> None:
+    """Print a horizontal rule of the given character to stdout."""
     print(char * width)
 
 
 # ── main ─────────────────────────────────────────────────────────────────────
 
-def main():
+def main() -> None:
+    """Scan the dataset directory and print a structured summary of all CSV files."""
     print("\n" + "═" * 100)
     print("  FPL DATASET EXPLORER")
     print("═" * 100)

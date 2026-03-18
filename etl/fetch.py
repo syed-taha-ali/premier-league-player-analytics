@@ -341,6 +341,7 @@ def write_season_csvs(
 # ---------------------------------------------------------------------------
 
 def _parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the fetch script."""
     p = argparse.ArgumentParser(description='FPL API fetcher — writes updated CSVs to data/')
     p.add_argument('--gw', type=int,
                    help='GW number to fetch (default: current finished GW)')

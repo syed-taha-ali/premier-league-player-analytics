@@ -1,5 +1,5 @@
 """
-Post-load validation checks (schema_design.md §7).
+Post-load validation checks (docs/schema_design.md §7).
 Prints PASS / FAIL for each check. Raises on any failure.
 """
 
@@ -13,10 +13,12 @@ from .schema import SEASONS
 
 
 def _q(conn: sqlite3.Connection, sql: str) -> pd.DataFrame:
+    """Execute sql on conn and return the scalar result."""
     return pd.read_sql(sql, conn)
 
 
 def _check(name: str, passed: bool, detail: str = '') -> None:
+    """Assert result == expected, printing PASS or FAIL; raise SystemExit on failure."""
     status = 'PASS' if passed else 'FAIL'
     msg = f"  [{status}] {name}"
     if detail:
@@ -27,6 +29,7 @@ def _check(name: str, passed: bool, detail: str = '') -> None:
 
 
 def run_all(conn: sqlite3.Connection) -> None:
+    """Run all 10 post-load validation checks; raises AssertionError if any fail."""
     print("\nRunning validation checks...")
 
     # 1. Row count sanity
@@ -38,7 +41,7 @@ def run_all(conn: sqlite3.Connection) -> None:
 
     total = counts['n'].sum()
     _check("fact_gw_player total rows in expected range",
-           200_000 <= total <= 280_000,
+           200_000 <= total <= 280_000,  # expected row count bracket for 10 seasons; widen when season 11 data is added
            f"{total:,} rows")
 
     # 2. Orphan player_code in fact_gw_player
@@ -84,7 +87,7 @@ def run_all(conn: sqlite3.Connection) -> None:
             ON f.player_code = dps.player_code AND f.season_id = dps.season_id
         WHERE dps.season_id < {current_season}
         GROUP BY dps.season_id, dps.player_code
-        HAVING ABS(COALESCE(SUM(f.total_points), 0) - COALESCE(dps.total_points, 0)) > 5
+        HAVING ABS(COALESCE(SUM(f.total_points), 0) - COALESCE(dps.total_points, 0)) > 5  -- ±5 pt tolerance for retroactive FPL score corrections
     """)
     _check("Season point totals reconcile (within ±5, completed seasons only)",
            reconcile.empty,
