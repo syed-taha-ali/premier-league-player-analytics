@@ -116,6 +116,43 @@ def predict_position(
     return pd.Series(preds, index=df_predict.index, name=f'pred_{model_name}')
 
 
+def _predict_bayesian_ridge_std(
+    position: str,
+    df_predict: pd.DataFrame,
+) -> pd.Series:
+    """
+    Return per-row prediction std from the BayesianRidge model.
+    Replicates the imputation/scaling steps of _predict_scaled_linear, then
+    calls model.predict(return_std=True) to get the posterior std.
+    """
+    bundle       = load_model(position, 'bayesian_ridge')
+    feat_cols    = bundle['feature_cols']
+    season_means = bundle['season_means']
+    global_means = bundle['global_means']
+    scaler       = bundle['scaler']
+    model        = bundle['model']
+    sid          = df_predict['season_id']
+
+    X_aligned = df_predict[feat_cols].reset_index(drop=True)
+    X_arr     = X_aligned.values.astype(float)
+    gm        = global_means[feat_cols].values
+
+    s_vals = sid.reset_index(drop=True).values
+    fill   = np.empty_like(X_arr)
+    for i, s in enumerate(s_vals):
+        if s in season_means.index:
+            fill[i] = season_means.loc[s, feat_cols].values
+        else:
+            fill[i] = gm
+    fill     = np.where(np.isnan(fill), gm, fill)
+    nan_mask = np.isnan(X_arr)
+    X_filled = np.where(nan_mask, fill, X_arr)
+    X_filled = np.where(np.isnan(X_filled), gm, X_filled)
+
+    _, std = model.predict(scaler.transform(X_filled), return_std=True)
+    return pd.Series(std, index=df_predict.index, name='pred_bayesian_ridge_std')
+
+
 # ---------------------------------------------------------------------------
 # GW prediction entry point
 # ---------------------------------------------------------------------------
@@ -162,6 +199,10 @@ def predict_gw(
         for model_name in models:
             try:
                 df_gw[f'pred_{model_name}'] = predict_position(position, model_name, df_gw)
+                if model_name == 'bayesian_ridge':
+                    df_gw['pred_bayesian_ridge_std'] = _predict_bayesian_ridge_std(
+                        position, df_gw
+                    )
             except FileNotFoundError as e:
                 log.error(str(e))
                 df_gw[f'pred_{model_name}'] = np.nan

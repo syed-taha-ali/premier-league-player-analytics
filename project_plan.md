@@ -1,7 +1,7 @@
 # FPL Analysis — Data Science Pipeline Plan
 
 **Project:** Fantasy Premier League player performance prediction
-**Database:** `db/fpl.db` — 242,316 GW rows, 10 seasons (2016-17 to 2025-26)
+**Database:** `db/fpl.db` — 247,308 GW rows, 10 seasons (2016-17 to 2025-26)
 **Goal:** Predict GW-level FPL points per player; surface insights via interactive dashboard
 
 ---
@@ -47,10 +47,10 @@
 | `dim_player` | player (cross-season) | ~2,620 |
 | `dim_team` | team × season | 200 |
 | `dim_player_season` | player × season | 7,334 |
-| `fact_gw_player` | player × fixture | 242,316 |
+| `fact_gw_player` | player × fixture | 247,308 |
 | `fact_player_season_history` | player × prior season | 5,419 |
 
-**Validation:** 11 automated checks (all passing); 32 logical checks + 11 case studies in `logs/`.
+**Validation:** 10 automated checks (all passing); 32 logical checks + 11 case studies in `logs/`.
 
 ---
 
@@ -250,7 +250,7 @@ Feature applicability by position:
 **Status: Complete.**
 
 **Deliverables:**
-- `ml/models.py` — central model registry (ModelSpec dataclass, build_fn / predict_fn for all 22 models)
+- `ml/models.py` — central model registry (ModelSpec dataclass, build_fn / predict_fn for 21 serialised models + catboost conditional stub + lstm/gru stubs)
 - `ml/evaluate.py` — 3-fold expanding-window CV; Pass 1 (tabular/decomposed), Pass 2 (meta); metrics, calibration plots, SHAP plots
 - `ml/evaluate_sequential.py` — standalone CV pipeline for LSTM / GRU (sequence reshaping, separate from tabular loop)
 - `ml/evaluate_phase6.py` — post-hoc Phase 6 evaluation: minutes bucket, price band, residual plots, learning curves
@@ -266,7 +266,7 @@ Feature applicability by position:
 - **Production model:** Ridge for all positions. CV MAE: GK 2.132 | DEF 2.138 | MID 1.830 | FWD 2.254
 - **Best ensemble:** Blending (ridge + bayesian_ridge + poisson_glm + mlp); beats Ridge on GK and DEF
 - **Uncertainty:** BayesianRidge pred_std available per prediction for dashboard confidence bands
-- **Sequential:** LSTM and GRU beat LightGBM on 3/4 positions but do not beat Ridge; not serialised
+- **Sequential:** LSTM and GRU beat LightGBM on 3/4 positions but do not beat Ridge; registered as stubs in `ml/models.py`, full implementation in `ml/evaluate_sequential.py`; not serialised
 - **Baseline gate:** 17 of 20 models pass across all 4 positions; 3 failures (fdr_mean, lasso, poly_ridge) are documented expected outcomes
 - **Monitoring thresholds (1.5× baseline MAE):** GK 3.494 | DEF 3.498 | MID 2.996 | FWD 3.609
 
@@ -549,10 +549,12 @@ FWD is highest priority. Run before end-of-season retraining.
 
 **`run_gw.py`** — end-to-end GW runner:
 ```
-Step 1  Fetch    etl/fetch.py writes CSVs to data/{season}/
-Step 2  ETL      python -m etl.run (full rebuild, ~16s, 11 validation checks)
-Step 3  Predict  ml/predict.predict_gw() -> outputs/predictions/gw{N}_s{season}_predictions.csv
-Step 4  Monitor  MAE/RMSE/Spearman/top-10 -> logs/monitoring/monitoring_log.csv
+Step 1  Fetch         etl/fetch.py writes CSVs to data/{season}/
+        Schema check  _step_schema_check() — non-fatal; logs to logs/monitoring/schema_alerts.csv
+Step 2  ETL           python -m etl.run (full rebuild, ~16s, 10 validation checks)
+Step 3  Predict       ml/predict.predict_gw() -> outputs/predictions/gw{N}_s{season}_predictions.csv
+Step 4  Monitor       MAE/RMSE/Spearman/top-10 -> logs/monitoring/monitoring_log.csv
+                      + writes logs/monitoring/gw{N}_s{season}_eval.md
 ```
 Flags: `--gw`, `--season`, `--skip-fetch`, `--skip-etl`, `--model`
 
@@ -581,15 +583,22 @@ Alert thresholds (1.5× baseline MAE): GK 3.494 | DEF 3.498 | MID 2.996 | FWD 3.
 
 ## Phase 9 — Monitoring
 
-### 9.1 Per-GW performance tracking
+**Status: Complete.**
+**Delivered:** branch `feature/phase9-monitoring`, commits `00b83b1`–`bc5bfc9`.
+**Report:** `docs/monitoring_report.md`
+
+### 9.1 Per-GW performance tracking (delivered)
 After each GW result is published:
 1. Join `gw{N}_s{season}_predictions.csv` against actual `fact_gw_player` results for that GW
 2. Compute: MAE, RMSE, Spearman ρ, top-10 precision for that GW
 3. Append to `logs/monitoring/monitoring_log.csv`
 
-### 9.2 Rolling metrics and alert thresholds
+Integrated into `run_gw.py` Step 4 (Monitor). GW 24 and GW 30 (season 10) confirmed
+within threshold; no alerts raised.
 
-Compute 5-GW rolling MAE per position per model. Thresholds are 1.5× the CV baseline MAE
+### 9.2 Rolling metrics and alert thresholds (delivered)
+
+5-GW rolling MAE computed per position per model. Thresholds are 1.5× the CV baseline MAE
 (rolling-mean baseline, averaged across 3 folds), seeded from Phase 5/6 results:
 
 | Position | Baseline MAE (CV mean) | Alert threshold (1.5×) |
@@ -599,20 +608,70 @@ Compute 5-GW rolling MAE per position per model. Thresholds are 1.5× the CV bas
 | MID | 1.997 | 2.996 |
 | FWD | 2.406 | 3.609 |
 
-Seed these values into `logs/monitoring/monitoring_log.csv` at Phase 9 initialisation.
 Flag and review if any model's 5-GW rolling MAE exceeds the threshold for its position.
 Trigger retraining if confirmed performance degradation (not a one-GW spike).
 
-### 9.3 Schema change alerting
-FPL has added new column groups each season (xG in 2022-23, manager mode in 2024-25,
-defensive stats in 2025-26). Before each season's data is loaded:
-- Check `merged_gw.csv` column set against `etl/schema.py` era definitions
-- Alert if new columns appear or existing columns are dropped
-- Update `etl/schema.py`, `ml/features.py`, and `project_plan.md` accordingly
+### 9.3 Schema change alerting (delivered)
 
-### 9.4 Output
+FPL has added new column groups each season (xG in 2022-23, manager mode in 2024-25,
+defensive stats in 2025-26). Implementation:
+
+- `EXPECTED_COLS` dict added to `etl/schema.py` — maps season_id to expected column
+  frozenset, derived from era flags in `SEASONS`.
+- `_step_schema_check()` added to `run_gw.py` — runs after Fetch, before ETL. Compares
+  actual `merged_gw.csv` columns against `EXPECTED_COLS`. Non-fatal: logs alerts, does
+  not abort pipeline.
+- Alert log: `logs/monitoring/schema_alerts.csv`
+  (schema: `season_id, gw, check_type, columns, logged_at`)
+- Season 10 special case: mng_* columns are retained as NULL columns in the 2025-26 CSV
+  despite the era flag marking them as dropped. Added to `EXPECTED_COLS[10]` to suppress
+  false positives.
+- Current status: header only, no alerts detected.
+
+If new columns appear or existing columns are dropped, update `etl/schema.py`,
+`ml/features.py`, and `project_plan.md` accordingly.
+
+### 9.4 Per-GW narrative reports (delivered)
+
+- `_write_gw_eval_report()` added to `run_gw.py`, called at end of `_step_monitor()`.
+- Output: `logs/monitoring/gw{N}_s{season}_eval.md`
+  Sections: summary table, top predictions vs actuals per position, largest misses,
+  rolling trend, alert status.
+- GW 30 (season 10) confirmed: all sections populated, all positions PASS.
+
+### 9.5 Dynamic CV folds (delivered)
+
+`CV_FOLDS` and `FOLD_LABELS` in `ml/evaluate.py` are now computed from `etl.schema.SEASONS`
+at import time, filtering seasons by `has_xg_stats=1` (index 7 in the SEASONS tuple).
+When season 11 is added to `etl/schema.py` with `has_xg_stats=1`, the 4th fold is added
+automatically — no manual edit to `evaluate.py` required.
+
+### 9.6 End-of-season retraining (delivered)
+
+**`retrain_season.py`** — 9-step end-of-season orchestrator:
+
+```
+Step 1  Verify        confirm new season data is present in merged_gw.csv
+Step 2  Archive       copy models/ to models/v{season-1}/ before overwriting
+Step 3  ETL           full drop-and-rebuild of db/fpl.db
+Step 4  Clear cache   delete outputs/features/*.parquet
+Step 5  Evaluate      python -m ml.evaluate (recomputes CV metrics on new fold)
+Step 6  Alpha search  python -m ml.train --alpha-search
+Step 7  Train all     python -m ml.train --all
+Step 8  Meta          python -m ml.train --meta
+Step 9  Report        writes logs/training/retrain_s{season}_report.md
+```
+
+Flags: `--dry-run` (print steps without executing), `--skip-archive`, `--skip-etl`.
+
+**Optuna LightGBM tuning** is not yet integrated into this flow. Run
+`python -m ml.train --tune --position FWD` separately before Step 7 — FWD is highest priority.
+
+### 9.7 Output
 - `logs/monitoring/monitoring_log.csv` — per-GW metrics with alert threshold columns
-- `logs/monitoring/gw{N}_eval.md` — narrative summary each GW
+- `logs/monitoring/schema_alerts.csv` — schema change alert log
+- `logs/monitoring/gw{N}_s{season}_eval.md` — narrative summary per GW
+- `logs/training/retrain_s{season}_report.md` — end-of-season retraining summary
 
 ---
 

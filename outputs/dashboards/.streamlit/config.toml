@@ -1,0 +1,14 @@
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+
+[client]
+showErrorDetails = true
+
+[global]
+# layout="wide" applied per-page via st.set_page_config — see app.py and each page file
