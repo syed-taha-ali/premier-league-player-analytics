@@ -96,8 +96,9 @@ if "value_lag1" in df.columns:
 else:
     df["price_m"] = np.nan
 
-# FDR from opponent_season_rank
-def _fdr(rank):
+# FDR from opponent_season_rank: rank 1–6 = FDR 5 (hardest), 18–20 = FDR 1 (easiest)
+def _fdr(rank: float | None) -> float:
+    """Map end-of-season opponent rank (1=strongest) to FDR score (5=hardest fixture)."""
     if pd.isna(rank):
         return np.nan
     r = float(rank)
@@ -137,7 +138,7 @@ if "price_m" in df.columns:
 
 # Differentials filter
 if show_differentials:
-    df = df[df["differential"] == True]
+    df = df[df["differential"]]
 
 # Top-N per position
 if model_col in df.columns:

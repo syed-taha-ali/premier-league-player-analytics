@@ -71,6 +71,7 @@ else:
             best_mae = pos_cv["mae"].min()
 
             def _highlight_ridge(row):
+                """Highlight Ridge rows green; highlight the best-MAE row yellow."""
                 if row["model"] == "ridge":
                     return ["background-color: #d4edda"] * len(row)
                 if row["mae"] == best_mae:

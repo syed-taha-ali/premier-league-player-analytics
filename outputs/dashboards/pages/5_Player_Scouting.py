@@ -39,6 +39,7 @@ st.caption(
 # ---------------------------------------------------------------------------
 
 def _player_search(label: str, key: str) -> int | None:
+    """Partial-name search: text_input → DB query → selectbox → returns player_code or None."""
     q = st.text_input(label, key=key, placeholder="e.g. Salah")
     if not q:
         return None
@@ -55,6 +56,7 @@ def _player_search(label: str, key: str) -> int | None:
 
 
 def _season_options() -> tuple[list[dict], dict]:
+    """Return (seasons list newest-first, {season_id: season_label} map)."""
     seasons = load_season_list()  # newest first
     sid_to_label = {s["season_id"]: s["season_label"] for s in seasons}
     return seasons, sid_to_label
@@ -87,6 +89,9 @@ with c2:
 with c3:
     bb_min_apps = st.number_input("Min appearances", min_value=3, max_value=38, value=5, key="bb_apps")
 
+# Validate bb_pos before embedding in SQL — selectbox constrains values but be explicit.
+if bb_pos not in (["All"] + POSITIONS):
+    bb_pos = "All"
 pos_clause = "" if bb_pos == "All" else f"AND dps.position_label = '{bb_pos}'"
 
 bb_raw = query_db(

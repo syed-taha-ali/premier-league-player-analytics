@@ -32,14 +32,27 @@ import numpy as np
 import pandas as pd
 
 from ml.features import build_feature_matrix, VALID_POSITIONS
+from sklearn.metrics import mean_absolute_error
+
 from ml.evaluate import (
     get_feature_cols,
     run_cv,
     summarise_cv,
     beats_baseline,
+    CV_FOLDS,
+    split_fold,
+    build_ridge,
+    _tune_lgbm,
     LOGS_DIR,
 )
-from ml.models import get_registry, get_model, tabular_models, meta_models
+from ml.models import (
+    get_registry,
+    get_model,
+    tabular_models,
+    meta_models,
+    _XGI_COL,
+    _XGI_DROP_POSITIONS,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -71,9 +84,6 @@ def _search_ridge_alpha(
     Returns the alpha with the lowest mean CV MAE.
     Writes per-fold results to logs/training/ridge_alpha_search.csv.
     """
-    from sklearn.metrics import mean_absolute_error
-    from ml.evaluate import CV_FOLDS, split_fold, build_ridge
-
     records: list[dict] = []
     alpha_maes: dict[float, list[float]] = {a: [] for a in _ALPHA_GRID}
 
@@ -89,7 +99,6 @@ def _search_ridge_alpha(
         s_v  = val_df['season_id'].reset_index(drop=True)
 
         # Apply xgi drop for MID/FWD (mirrors _build_ridge logic)
-        from ml.models import _XGI_COL, _XGI_DROP_POSITIONS
         if position in _XGI_DROP_POSITIONS and _XGI_COL in X_tr.columns:
             X_tr = X_tr.drop(columns=[_XGI_COL])
             X_v  = X_v.drop(columns=[_XGI_COL], errors='ignore')
@@ -154,7 +163,6 @@ def _train_tabular(
 
     if spec.name == 'lgbm' and tune:
         log.info(f'[train] {position}/lgbm: running Optuna on fold 3 ...')
-        from ml.evaluate import CV_FOLDS, split_fold, _tune_lgbm
         train_seasons, val_season = CV_FOLDS[-1]
         train_df, val_df = split_fold(df, train_seasons, val_season)
         tuned = _tune_lgbm(
@@ -426,6 +434,7 @@ def train_meta_all() -> None:
 # ---------------------------------------------------------------------------
 
 def _parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the training script."""
     p = argparse.ArgumentParser(description='FPL Phase 5 final model training')
     p.add_argument('--position', choices=list(VALID_POSITIONS),
                    help='Train for one position only (default: all)')

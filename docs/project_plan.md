@@ -718,3 +718,4 @@ Flags: `--dry-run` (print steps without executing), `--skip-archive`, `--skip-et
 - See `docs/data_biases.md` for full bias analysis and ML mitigation guidance
 - See `docs/eda_report.md` for EDA findings and Phase 4 recommendations (Section 2)
 - See `schema_design.md` for full DDL and schema rationale
+- See `REPORT.md` for the end-to-end portfolio report covering all 9 phases (EDA, features, modelling, evaluation, dashboard, monitoring)

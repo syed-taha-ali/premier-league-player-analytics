@@ -89,6 +89,7 @@ _SEASON_LABELS_MAP = {s[0]: s[1] for s in _SEASONS}
 
 
 def _fold_label(train_ids: list[int], val_id: int) -> str:
+    """Format a human-readable fold label e.g. 'train 2022-23 -> val 2023-24'."""
     if len(train_ids) == 1:
         train_str = _SEASON_LABELS_MAP[train_ids[0]]
     else:
@@ -104,7 +105,7 @@ FOLD_LABELS = {
 }
 
 # ---------------------------------------------------------------------------
-# LightGBM hyperparameters (project_plan.md §5.3)
+# LightGBM hyperparameters (docs/project_plan.md §5.3)
 # ---------------------------------------------------------------------------
 LGBM_BASE_PARAMS = {
     'GK':  dict(num_leaves=15, min_child_samples=30, learning_rate=0.05, n_estimators=200),
@@ -136,6 +137,7 @@ def get_feature_cols(df: pd.DataFrame) -> list[str]:
 def split_fold(
     df: pd.DataFrame, train_seasons: list[int], val_season: int
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return (train_df, val_df) split on season_id membership."""
     train = df[df['season_id'].isin(train_seasons)].copy()
     val   = df[df['season_id'] == val_season].copy()
     return train, val
@@ -143,7 +145,7 @@ def split_fold(
 
 # ---------------------------------------------------------------------------
 # Stratified mean imputation (Ridge only)
-# project_plan.md §5.3: impute within training fold, stratified by season_id.
+# docs/project_plan.md §5.3: impute within training fold, stratified by season_id.
 # Never fit the imputer on the full dataset or the validation fold.
 # ---------------------------------------------------------------------------
 
@@ -276,7 +278,7 @@ def build_lgbm(
     Fit LightGBM. Native NaN handling -- no imputation.
 
     If tune=True and optuna is available, run Bayesian hyperparameter search
-    using X_val/y_val as the evaluation set (project_plan.md §5.3).
+    using X_val/y_val as the evaluation set (docs/project_plan.md §5.3).
     """
     params = {**LGBM_BASE_PARAMS[position], **_LGBM_COMMON}
     if extra_params:
@@ -570,7 +572,7 @@ def summarise_cv(metrics_df: pd.DataFrame) -> pd.DataFrame:
 def beats_baseline(summary: pd.DataFrame) -> dict[str, bool]:
     """
     Check whether each non-baseline model beats the baseline on >= 2 of 3 primary
-    metrics (MAE lower, RMSE lower, Spearman higher). project_plan.md §6.5.
+    metrics (MAE lower, RMSE lower, Spearman higher). docs/project_plan.md §6.5.
     """
     results = {}
     if 'baseline' not in summary.index:
@@ -812,6 +814,7 @@ def run_all_positions(tune_lgbm: bool = False) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def _parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the CV evaluation script."""
     p = argparse.ArgumentParser(description='FPL Phase 5/6 CV evaluation')
     p.add_argument('--position', choices=list(VALID_POSITIONS),
                    help='Run for one position only (default: all)')

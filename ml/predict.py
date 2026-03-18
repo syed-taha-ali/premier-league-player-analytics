@@ -54,7 +54,12 @@ OUTPUTS_PRED = _HERE / 'outputs' / 'predictions'
 # ---------------------------------------------------------------------------
 
 def load_model(position: str, model_name: str) -> dict:
-    """Load a serialised model bundle from models/{position}_{model_name}.pkl."""
+    """
+    Load a serialised model bundle from models/{position}_{model_name}.pkl.
+
+    Expected bundle keys: feature_cols, model, scaler (linear models),
+    season_means, global_means (imputed models), preds (val-fold OOF predictions).
+    """
     path = MODELS_DIR / f'{position}_{model_name}.pkl'
     if not path.exists():
         raise FileNotFoundError(
@@ -238,6 +243,7 @@ def predict_gw(
 
 
 def _save_predictions(df: pd.DataFrame, gw: int | None, season_id: int | None) -> None:
+    """Save the predictions DataFrame to outputs/predictions/gw{N}_s{season}_predictions.csv."""
     OUTPUTS_PRED.mkdir(parents=True, exist_ok=True)
     gw_tag      = gw or df['gw'].max()
     season_tag  = season_id or df['season_id'].max()
@@ -248,6 +254,7 @@ def _save_predictions(df: pd.DataFrame, gw: int | None, season_id: int | None) -
 
 
 def _print_top_n(df: pd.DataFrame, rank_col: str, n: int) -> None:
+    """Print the top-N players per position ranked by rank_col to stdout."""
     print(f'\n{"="*60}')
     print(f'Top {n} predictions per position (ranked by {rank_col})')
     print('='*60)
@@ -301,7 +308,7 @@ def evaluate_predictions(
                 feat_cols  = get_feature_cols(df_gw)
                 X          = df_gw[feat_cols]
                 preds      = spec.predict_fn(bundle, X, sid=df_gw['season_id'])
-            except Exception:
+            except (KeyError, ValueError, AttributeError):
                 continue
             actuals = df_gw['total_points'].values
             mae     = mean_absolute_error(actuals, preds)
@@ -327,6 +334,7 @@ def evaluate_predictions(
 # ---------------------------------------------------------------------------
 
 def _parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the prediction script."""
     p = argparse.ArgumentParser(description='FPL GW prediction inference')
     p.add_argument('--gw',     type=int, help='Gameweek number to predict')
     p.add_argument('--season', type=int, help='Season ID (e.g. 10 = 2025-26)')

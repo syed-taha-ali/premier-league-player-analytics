@@ -68,6 +68,10 @@ def _build_baseline(
     sid_val: pd.Series | None = None,
     **kwargs,
 ) -> dict:
+    """
+    Build a rolling-mean baseline bundle.
+    Prediction = pts_rolling_5gw; falls back to training-fold mean when NaN.
+    """
     from ml.evaluate import baseline_predict
     fallback_mean = float(y_train.mean())
     preds = baseline_predict(X_val, fallback_mean) if X_val is not None else None
@@ -84,6 +88,7 @@ def _predict_baseline(
     sid: pd.Series | None = None,
     **kwargs,
 ) -> np.ndarray:
+    """Return pts_rolling_5gw as the prediction, substituting the training mean for NaN rows."""
     fallback = bundle.get('fallback_mean', 1.0)
     return X['pts_rolling_5gw'].fillna(fallback).values
 
@@ -103,6 +108,10 @@ def _build_ridge(
     alpha: float = 1.0,
     **kwargs,
 ) -> dict:
+    """
+    Build a Ridge regression bundle with stratified imputation and StandardScaler.
+    Drops xgi_rolling_5gw for MID and FWD to resolve xG/xA/xGI collinearity.
+    """
     from ml.evaluate import build_ridge
 
     # xg + xa already captures xgi signal; drop collinear xgi for MID/FWD
@@ -161,6 +170,7 @@ def _predict_ridge(
     sid: pd.Series | None = None,
     **kwargs,
 ) -> np.ndarray:
+    """Predict using the fitted Ridge bundle via the shared scaled-linear inference path."""
     return _predict_scaled_linear(bundle, X, sid=sid)
 
 
@@ -176,6 +186,11 @@ def _build_lgbm(
     extra_params: dict | None = None,
     **kwargs,
 ) -> dict:
+    """
+    Build a LightGBM bundle using position-specific hyperparameters.
+    Native NaN support — no imputation or scaling applied.
+    If tune=True, runs Optuna on fold 3 to find optimal hyperparameters first.
+    """
     from ml.evaluate import build_lgbm
     return build_lgbm(
         X_train, y_train, position, X_val, y_val,
@@ -189,6 +204,7 @@ def _predict_lgbm(
     sid: pd.Series | None = None,
     **kwargs,
 ) -> np.ndarray:
+    """Predict using a fitted LightGBM model; NaN values are handled natively by LightGBM."""
     return bundle['model'].predict(X[bundle['feature_cols']])
 
 
@@ -303,6 +319,7 @@ def _predict_position_mean(
     sid: pd.Series | None = None,
     **kwargs,
 ) -> np.ndarray:
+    """Predict using stored home/away mean points; falls back to the training-fold mean."""
     means    = bundle['means']
     fallback = bundle['fallback']
     position = bundle.get('position', '')
@@ -320,6 +337,7 @@ def _build_elasticnet(
     sid_val: pd.Series | None = None,
     **kwargs,
 ) -> dict:
+    """Build an ElasticNet bundle (alpha=1.0, l1_ratio=0.5) with imputation and scaling."""
     from sklearn.linear_model import ElasticNet
     estimator = ElasticNet(alpha=1.0, l1_ratio=0.5, random_state=42, max_iter=2000)
     return _build_scaled_linear(
@@ -337,6 +355,10 @@ def _build_bayesian_ridge(
     sid_val: pd.Series | None = None,
     **kwargs,
 ) -> dict:
+    """
+    Build a BayesianRidge bundle with imputation and scaling.
+    Stores posterior predictive std in bundle['pred_std'] for uncertainty quantification.
+    """
     from sklearn.linear_model import BayesianRidge
     estimator = BayesianRidge()
     return _build_scaled_linear(
@@ -355,6 +377,7 @@ def _build_lasso(
     sid_val: pd.Series | None = None,
     **kwargs,
 ) -> dict:
+    """Build a Lasso bundle (alpha=1.0, max_iter=2000) with imputation and scaling."""
     from sklearn.linear_model import Lasso
     estimator = Lasso(alpha=1.0, random_state=42, max_iter=2000)
     return _build_scaled_linear(
@@ -370,6 +393,7 @@ _REGISTRY: dict[str, ModelSpec] = {}
 
 
 def _register(spec: ModelSpec) -> None:
+    """Add a ModelSpec to the module-level registry dict."""
     _REGISTRY[spec.name] = spec
 
 
@@ -565,6 +589,7 @@ def _build_xgb(
     sid_val: pd.Series | None = None,
     **kwargs,
 ) -> dict:
+    """Build an XGBoost bundle using tree_method='hist'; native NaN support, no imputation."""
     from xgboost import XGBRegressor
     params = {**_XGB_BASE_PARAMS[position], **_XGB_COMMON}
     model  = XGBRegressor(**params)
@@ -588,6 +613,7 @@ def _build_random_forest(
     sid_val: pd.Series | None = None,
     **kwargs,
 ) -> dict:
+    """Build a RandomForest bundle (n_estimators=200) with stratified mean imputation."""
     from sklearn.ensemble import RandomForestRegressor
     estimator = RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1)
     return _build_imputed_tree(
@@ -605,6 +631,7 @@ def _build_extra_trees(
     sid_val: pd.Series | None = None,
     **kwargs,
 ) -> dict:
+    """Build an ExtraTrees bundle (n_estimators=200) with stratified mean imputation."""
     from sklearn.ensemble import ExtraTreesRegressor
     estimator = ExtraTreesRegressor(n_estimators=200, random_state=42, n_jobs=-1)
     return _build_imputed_tree(
@@ -622,6 +649,7 @@ def _build_hist_gb(
     sid_val: pd.Series | None = None,
     **kwargs,
 ) -> dict:
+    """Build a HistGradientBoosting bundle; native NaN support, no imputation or scaling."""
     from sklearn.ensemble import HistGradientBoostingRegressor
     model = HistGradientBoostingRegressor(random_state=42)
     model.fit(X_train, y_train)
@@ -643,6 +671,10 @@ def _build_catboost(
     sid_val: pd.Series | None = None,
     **kwargs,
 ) -> dict:
+    """
+    Build a CatBoost bundle (iterations=300, depth=6); native NaN support.
+    Requires the catboost package — conditionally registered at module load.
+    """
     from catboost import CatBoostRegressor
     model = CatBoostRegressor(
         iterations=300, learning_rate=0.05, depth=6,
@@ -700,6 +732,7 @@ _register(ModelSpec(
 ))
 
 try:
+    # catboost is optional — register only if the package is installed
     import catboost as _catboost_mod  # noqa: F401
     _register(ModelSpec(
         name='catboost',
@@ -778,6 +811,7 @@ def _predict_poisson_glm(
     sid: pd.Series | None = None,
     **kwargs,
 ) -> np.ndarray:
+    """Predict using the fitted Poisson GLM; applies imputation and reverses the target shift."""
     feat_cols    = bundle['feature_cols']
     season_means = bundle['season_means']
     global_means = bundle['global_means']
@@ -877,6 +911,7 @@ def _predict_fdr_mean(
     sid: pd.Series | None = None,
     **kwargs,
 ) -> np.ndarray:
+    """Scale pts_rolling_5gw by FDR-bin multipliers trained from CV fold data."""
     multipliers = bundle['multipliers']
     fallback    = bundle['fallback']
     rolling_v   = X['pts_rolling_5gw'].reset_index(drop=True)
@@ -961,6 +996,7 @@ def _predict_last_season_avg(
     sid: pd.Series | None = None,
     **kwargs,
 ) -> np.ndarray:
+    """Predict using player's prior-season average, falling back to rolling form."""
     _df            = kwargs.get('_df')
     player_prior   = bundle['player_prior_season']
     global_fallback = bundle['global_fallback']
@@ -1035,6 +1071,7 @@ def _build_mlp(
     sid_val: pd.Series | None = None,
     **kwargs,
 ) -> dict:
+    """Fit a 2-layer MLP with stratified imputation + StandardScaler. GK uses a smaller network."""
     from sklearn.neural_network import MLPRegressor
     hidden = (32, 16) if position == 'GK' else (64, 32)
     estimator = MLPRegressor(
@@ -1101,6 +1138,7 @@ def _predict_simple_avg(
     sid: pd.Series | None = None,
     **kwargs,
 ) -> np.ndarray:
+    """Return the column-mean of all available base model predictions."""
     _dep_preds  = kwargs.get('_dep_preds', {})
     base_models = bundle['base_models']
     available   = [m for m in base_models if m in _dep_preds and _dep_preds[m] is not None]
@@ -1181,6 +1219,7 @@ def _predict_stacking(
     sid: pd.Series | None = None,
     **kwargs,
 ) -> np.ndarray:
+    """Run base-model predictions through the fitted meta-model (Ridge stacker)."""
     _dep_preds  = kwargs.get('_dep_preds', {})
     meta_model  = bundle.get('meta_model')
     scaler      = bundle.get('scaler')
@@ -1411,6 +1450,7 @@ def _predict_minutes_model(
     sid: pd.Series | None = None,
     **kwargs,
 ) -> np.ndarray:
+    """Predict expected minutes using the Ridge minutes model bundle."""
     feat_cols    = bundle['feature_cols']
     season_means = bundle['season_means']
     global_means = bundle['global_means']
@@ -1534,6 +1574,7 @@ def _predict_component_model(
     sid: pd.Series | None = None,
     **kwargs,
 ) -> np.ndarray:
+    """Predict using the component model (Ridge trained on per-action component targets)."""
     feat_cols    = bundle['feature_cols']
     season_means = bundle['season_means']
     global_means = bundle['global_means']
@@ -1613,6 +1654,7 @@ def _predict_poly_ridge(
     sid: pd.Series | None = None,
     **kwargs,
 ) -> np.ndarray:
+    """Predict using the degree-2 polynomial Ridge bundle (imputation + scale + poly transform)."""
     feat_cols    = bundle['feature_cols']
     season_means = bundle['season_means']
     global_means = bundle['global_means']
@@ -1746,6 +1788,7 @@ _register(ModelSpec(
 # ---------------------------------------------------------------------------
 
 def _seq_build_stub(X_train, y_train, position, **kwargs):
+    """Raise NotImplementedError — sequential models use ml/evaluate_sequential.py."""
     raise NotImplementedError(
         'Sequential models must be trained via ml/evaluate_sequential.py, '
         'not through the main tabular train pipeline.'
@@ -1753,6 +1796,7 @@ def _seq_build_stub(X_train, y_train, position, **kwargs):
 
 
 def _seq_predict_stub(bundle, X, **kwargs):
+    """Raise NotImplementedError — sequential models use ml/evaluate_sequential.py."""
     raise NotImplementedError(
         'Sequential models are not supported by the tabular predict pipeline. '
         'Use ml/evaluate_sequential.py instead.'

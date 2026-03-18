@@ -50,6 +50,7 @@ def _season_options() -> list[dict]:
 
 
 def _team_options(season_id: int) -> list[str]:
+    """Return sorted list of team names for the given season."""
     df = query_db(
         "SELECT DISTINCT team_name FROM dim_team WHERE season_id = ? ORDER BY team_name",
         params=(season_id,),
@@ -92,6 +93,7 @@ def _result_block(df: pd.DataFrame, filename: str = "result.csv") -> None:
 
 
 def _xg_warning(season_id: int) -> None:
+    """Display a Streamlit warning if the selected season pre-dates xG availability."""
     if season_id < XG_ERA_MIN_SEASON:
         st.warning("xG stats are not available before 2022-23 (season 7). xG columns will be NULL.")
 
@@ -381,6 +383,7 @@ elif template.startswith("6"):
 
     if code_a and code_b and st.button("Compare", key="t6_run"):
         def _career(pcode):
+            """Fetch season-by-season stats for one player_code."""
             return query_db(
                 """
                 SELECT ds.season_label AS season, dps.total_points AS season_pts,
@@ -440,6 +443,7 @@ elif template.startswith("7"):
     mc = metric_col_map[metric]
 
     def _xg_expr(col, per_90, alias):
+        """Return the SQL expression for a cumulative or per-90 xG stat."""
         if per_90:
             return f"ROUND(SUM(f.{col}) / NULLIF(SUM(f.minutes) / 90.0, 0), 3) AS {alias}"
         return f"ROUND(SUM(f.{col}), 2) AS {alias}"
