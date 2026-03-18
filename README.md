@@ -182,39 +182,134 @@ the current top-5 predicted players per position.
 
 ```
 fpl_analysis/
-├── data/                        # Raw FPL CSVs (download from release — not in git)
-│   └── {season}/gws/merged_gw.csv
+│
+├── explore_dataset.py                     # Dataset scanner: column names + samples
+├── LICENSE
+├── README.md
+├── REPORT.md                              # End-to-end portfolio report (all 9 phases)
+├── requirements.txt
+├── retrain_season.py                      # End-of-season retraining orchestrator (9 steps)
+├── run_gw.py                              # Live post-GW pipeline: fetch → ETL → predict → monitor
+│
+├── data/                                  # Raw FPL CSVs — not in git (download from release)
+│   ├── 2016-17/
+│   │   ├── gws/
+│   │   │   ├── merged_gw.csv             # PRIMARY fact source — one row per player per GW fixture
+│   │   │   ├── gw1.csv ... gw38.csv      # Individual GW files (not used by pipeline)
+│   │   │   └── xP1.csv ... xP38.csv      # Expected points files (not used by pipeline)
+│   │   ├── players/
+│   │   │   └── {Player_Name}/
+│   │   │       ├── gw.csv                # Redundant with merged_gw — not used
+│   │   │       └── history.csv           # AUTHORITATIVE for start_cost / end_cost
+│   │   ├── cleaned_players.csv           # Subset of players_raw — not used
+│   │   ├── player_idlist.csv             # Derivable from players_raw — not used
+│   │   └── players_raw.csv               # Player + season dimension data (latest API snapshot)
+│   ├── 2017-18/                          # Same structure for each of the 10 seasons
+│   ├── 2018-19/
+│   ├── 2019-20/                          # COVID season: GWs 1–29, then 39–47 (gap 30–38)
+│   ├── 2020-21/
+│   ├── 2021-22/
+│   ├── 2022-23/                          # xG era begins (season_id = 7)
+│   ├── 2023-24/
+│   ├── 2024-25/                          # Manager era: mng_* columns
+│   ├── 2025-26/                          # Defensive era: defensive_contribution, recoveries
+│   ├── DATA_DICTIONARY.md
+│   ├── master_team_list.csv              # Team ID → name map (2016-17 to 2023-24 only)
+│   └── README.md
+│
 ├── db/
-│   └── fpl.db                   # SQLite database (247,308 rows, 53.8 MB)
-├── etl/
-│   ├── schema.py                # DDL, season metadata, expected columns per era
-│   ├── loaders.py               # One loader function per table
-│   ├── validate.py              # 10 post-load assertion checks
-│   ├── fetch.py                 # FPL API client with retry logic
-│   └── run.py                   # ETL entry point
-├── ml/
-│   ├── features.py              # Feature matrix builder + parquet cache
-│   ├── models.py                # Central model registry (ModelSpec dataclass)
-│   ├── train.py                 # Training + serialisation (--all, --meta, --alpha-search)
-│   ├── evaluate.py              # Expanding-window CV, metrics, SHAP, calibration plots
-│   ├── evaluate_phase6.py       # Post-hoc stratified analysis (minutes bucket, price band)
-│   ├── evaluate_sequential.py   # LSTM/GRU standalone CV pipeline
-│   └── predict.py               # Inference on new GW feature rows
-├── models/                      # 168 artefacts: {position}_{model}.pkl + _meta.json
-├── outputs/
-│   ├── dashboards/              # Streamlit app (app.py, utils.py, pages/1–6)
-│   ├── features/                # Cached feature matrices (.parquet — auto-rebuilt)
-│   ├── models/                  # Calibration, SHAP, MAE-by-fold, residual plots
-│   └── predictions/             # Per-GW prediction CSVs
-├── logs/
-│   ├── training/                # CV metrics CSVs, OOF parquets, alpha search, retrain reports
-│   └── monitoring/              # monitoring_log.csv, schema_alerts.csv, gw*_eval.md reports
-├── docs/                        # Phase reports, schema design, modelling plan, code review
+│   └── fpl.db                            # SQLite database — rebuilt by python -m etl.run
+│                                         # 247,308 GW rows | 6-table star schema | 53.8 MB
+│
+├── docs/
+│   ├── code_review.md                    # Production-level code review (8.5 / 10)
+│   ├── dashboard_report.md               # Phase 7: page specs, embedded visuals, integration checks
+│   ├── data_biases.md                    # 10 quantified ML biases with mitigations
+│   ├── deployment_report.md              # Phase 8: Ridge improvements, live pipeline, monitoring
+│   ├── eda_report.md                     # EDA findings and Phase 4 recommendations
+│   ├── feature_engineering.md            # Phase 4 report: features, outputs, Phase 5 implications
+│   ├── modelling_evaluation_report.md    # Phase 5/6: CV results, stratifications, diagnostics
+│   ├── modelling_plan.md                 # Model inventory, tier rationale, registry architecture
+│   ├── monitoring_report.md              # Phase 9: schema alerting, eval reports, retraining
+│   ├── phase7_plan.md                    # Phase 7 full implementation plan
+│   ├── project_plan.md                   # Full pipeline specification — source of truth
+│   └── schema_design.md                  # Star schema: all tables, columns, PKs, FKs, derivations
+│
 ├── eda/
-│   └── eda_report.ipynb         # EDA notebook (25 code cells, 30 markdown cells)
-├── run_gw.py                    # Live post-GW pipeline (fetch → ETL → predict → monitor)
-├── retrain_season.py            # End-of-season retraining orchestrator (9 steps)
-└── requirements.txt
+│   └── eda_report.ipynb                  # EDA notebook (25 code cells, 30 markdown cells)
+│
+├── etl/
+│   ├── __init__.py
+│   ├── fetch.py                          # FPL API client with exponential-backoff retry logic
+│   ├── loaders.py                        # One loader function per table (6 functions)
+│   ├── run.py                            # Entry point: python -m etl.run
+│   ├── schema.py                         # DDL, SEASONS tuple, era flags, EXPECTED_COLS per season
+│   └── validate.py                       # 10 post-load assertion checks (raises on failure)
+│
+├── logs/
+│   ├── db_check_casestudy.md             # Case-study cross-table validation log
+│   ├── db_check_full.md                  # Full logical soundness audit (32 checks)
+│   ├── monitoring/
+│   │   ├── gw{N}_s{season}_eval.md       # Per-GW narrative evaluation reports
+│   │   ├── monitoring_log.csv            # Per-GW MAE / RMSE / Spearman / top-10 prec / alert
+│   │   └── schema_alerts.csv             # Schema change alerts: season_id, gw, check_type, columns
+│   └── training/
+│       ├── cv_metrics_all.csv            # Combined CV metrics across all positions
+│       ├── cv_metrics_{GK|DEF|MID|FWD}.csv
+│       ├── cv_metrics_{GK|DEF|MID|FWD}_seq.csv   # LSTM/GRU sequential model CV results
+│       ├── cv_preds_{GK|DEF|MID|FWD}.parquet     # OOF predictions used for meta-model training
+│       ├── cv_report_{GK|DEF|MID|FWD}.md         # Per-position CV summary report
+│       └── ridge_alpha_search.csv        # Alpha grid search results per position and fold
+│
+├── ml/
+│   ├── evaluate.py                       # Expanding-window CV, metrics, SHAP, calibration plots
+│   ├── evaluate_phase6.py                # Post-hoc analysis: minutes bucket, price band, residuals
+│   ├── evaluate_sequential.py            # Standalone LSTM/GRU CV pipeline (PyTorch)
+│   ├── features.py                       # build_feature_matrix() — 20+ features, parquet cache
+│   ├── models.py                         # Central registry: ModelSpec dataclass, 21 models
+│   ├── predict.py                        # Inference on new GW data: python -m ml.predict
+│   └── train.py                          # Training + serialisation (--all / --meta / --alpha-search)
+│
+├── models/                               # 168 serialised artefacts — not in git
+│   ├── DEF_baseline.pkl                  # Naming: {GK|DEF|MID|FWD}_{model_name}.pkl
+│   ├── DEF_baseline_meta.json            # Metadata: CV MAE, feature list, alpha, timestamp
+│   ├── ... (21 models × 4 positions × 2 files = 168 total)
+│   └── v{season}/                        # Archived models from previous season (retrain_season.py)
+│
+└── outputs/
+    ├── dashboards/
+    │   ├── app.py                        # Landing page: monitoring summary + top predictions
+    │   ├── utils.py                      # Shared loaders: query_db, load_predictions, load_oof, etc.
+    │   ├── .streamlit/
+    │   │   └── config.toml               # Wide layout, light theme, headless config
+    │   └── pages/
+    │       ├── 1_Data_Explorer.py        # Points distributions, home/away, team heatmap, xG scatter
+    │       ├── 2_Bias_Quality.py         # 10 ML biases, era comparison, fixture difficulty
+    │       ├── 3_Model_Performance.py    # CV table, calibration, MAE-by-fold, SHAP, residuals
+    │       ├── 4_GW_Predictions.py       # FDR calendar, ranked predictions, uncertainty bands
+    │       ├── 5_Player_Scouting.py      # Boom/bust quadrant, value picks, career stats
+    │       └── 6_Database_Explorer.py    # 20 SQL templates + free-form SQL editor
+    ├── eda/                              # 22 exported EDA charts (PNG)
+    │   ├── era_comparison.png
+    │   ├── home_away_effect.png
+    │   ├── points_distribution.png
+    │   ├── team_strength_heatmap.png
+    │   ├── top6_fixture_effect.png
+    │   └── ... (22 charts total)
+    ├── features/                         # Cached feature matrices — clear before retraining
+    │   ├── feature_matrix_DEF.parquet
+    │   ├── feature_matrix_FWD.parquet
+    │   ├── feature_matrix_GK.parquet
+    │   └── feature_matrix_MID.parquet
+    ├── models/                           # Diagnostic plots (one set per position)
+    │   ├── calibration_{GK|DEF|MID|FWD}.png
+    │   ├── learning_curves.png
+    │   ├── mae_by_fold_{GK|DEF|MID|FWD}.png
+    │   ├── residuals_{GK|DEF|MID|FWD}.png
+    │   └── shap_{GK|DEF|MID|FWD}.png
+    └── predictions/                      # Per-GW prediction CSVs (written by run_gw.py)
+        ├── gw24_s10_predictions.csv
+        └── gw30_s10_predictions.csv
 ```
 
 ---
