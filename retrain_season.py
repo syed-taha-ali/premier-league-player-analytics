@@ -68,7 +68,7 @@ def _validate_prerequisites(season: int) -> tuple[str, int]:
 
     Raises RuntimeError if any prerequisite fails.
     """
-    from etl.schema import SEASONS, LABEL_TO_ID
+    from etl.schema import SEASONS
 
     season_row = next((s for s in SEASONS if s[0] == season), None)
     if season_row is None:

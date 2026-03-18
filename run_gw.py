@@ -130,6 +130,7 @@ def _step_schema_check(gw: int, season_id: int) -> None:
         })
 
     if alerts:
+        _MONITOR_DIR.mkdir(parents=True, exist_ok=True)
         schema_csv = _MONITOR_DIR / 'schema_alerts.csv'
         schema_cols = ['season_id', 'gw', 'check_type', 'columns', 'logged_at']
         if schema_csv.exists():
@@ -283,7 +284,7 @@ def _step_monitor(
             f"threshold={row['threshold']:.4f}{alert_flag}"
         )
 
-    _write_gw_eval_report(gw, season_id, predictions, new_rows)
+    _write_gw_eval_report(gw, season_id, predictions, new_rows, primary_model)
 
 
 def _write_gw_eval_report(
@@ -291,6 +292,7 @@ def _write_gw_eval_report(
     season_id: int,
     predictions: pd.DataFrame,
     new_rows: list,
+    primary_model: str = 'ridge',
 ) -> None:
     """
     Write a per-GW narrative evaluation report to
@@ -305,7 +307,7 @@ def _write_gw_eval_report(
     """
     season_label = _SEASON_LABELS.get(season_id, str(season_id))
     date_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-    pred_col = 'pred_ridge'
+    pred_col = f'pred_{primary_model}'
 
     lines: list[str] = [
         f'# GW {gw} Evaluation -- Season {season_label} ({date_str})',
@@ -351,8 +353,8 @@ def _write_gw_eval_report(
 
         lines.append('**Top 5 by predicted score:**')
         lines += [
-            '| player_code | pred_ridge | actual | abs_error |',
-            '|-------------|------------|--------|-----------|',
+            f'| player_code | pred_{primary_model} | actual | abs_error |',
+            '|-------------|----------------------|--------|-----------|',
         ]
         for _, r in top_pred.iterrows():
             lines.append(
@@ -362,8 +364,8 @@ def _write_gw_eval_report(
 
         lines += ['', '**Top 5 actual scorers:**']
         lines += [
-            '| player_code | pred_ridge | actual | abs_error |',
-            '|-------------|------------|--------|-----------|',
+            f'| player_code | pred_{primary_model} | actual | abs_error |',
+            '|-------------|----------------------|--------|-----------|',
         ]
         for _, r in top_actual.iterrows():
             lines.append(
@@ -379,8 +381,8 @@ def _write_gw_eval_report(
             all_valid['abs_error'] = (all_valid[pred_col] - all_valid['total_points']).abs()
             top_misses = all_valid.nlargest(5, 'abs_error')
             lines += [
-                '| player_code | position | pred_ridge | actual | abs_error |',
-                '|-------------|----------|------------|--------|-----------|',
+                f'| player_code | position | pred_{primary_model} | actual | abs_error |',
+                '|-------------|----------|-----------------------|--------|-----------|',
             ]
             for _, r in top_misses.iterrows():
                 lines.append(
