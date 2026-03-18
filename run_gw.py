@@ -155,7 +155,7 @@ def _step_etl() -> None:
     )
     if result.returncode != 0:
         raise RuntimeError('[step2] ETL failed — aborting GW run.')
-    log.info('[step2] ETL complete — all 11 validation checks passed')
+    log.info('[step2] ETL complete — all 10 validation checks passed')
 
 
 def _step_predict(gw: int, season_id: int, models: tuple[str, ...]) -> pd.DataFrame:
