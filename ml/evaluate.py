@@ -70,19 +70,37 @@ OUTPUTS_MODELS   = _HERE / 'outputs' / 'models'
 MODELS_DIR       = _HERE / 'models'
 
 # ---------------------------------------------------------------------------
-# CV fold definitions
+# CV fold definitions (dynamic -- auto-extends when new xG era seasons are added)
 # ---------------------------------------------------------------------------
+from etl.schema import SEASONS as _SEASONS
+
+# Collect xG era season IDs in ascending order (has_xg_stats flag at index 7)
+_XG_SEASON_IDS = sorted(s[0] for s in _SEASONS if s[7] == 1)
+
 # Each entry: (train_season_ids, val_season_id)
+# e.g. for seasons [7,8,9,10]:
+#   ([7], 8), ([7,8], 9), ([7,8,9], 10)
 CV_FOLDS = [
-    ([7],       8),
-    ([7, 8],    9),
-    ([7, 8, 9], 10),
+    (_XG_SEASON_IDS[:i], _XG_SEASON_IDS[i])
+    for i in range(1, len(_XG_SEASON_IDS))
 ]
 
+_SEASON_LABELS_MAP = {s[0]: s[1] for s in _SEASONS}
+
+
+def _fold_label(train_ids: list[int], val_id: int) -> str:
+    if len(train_ids) == 1:
+        train_str = _SEASON_LABELS_MAP[train_ids[0]]
+    else:
+        first_yr = _SEASON_LABELS_MAP[train_ids[0]][:4]
+        last_yr  = _SEASON_LABELS_MAP[train_ids[-1]][5:]
+        train_str = f'{first_yr}-{last_yr}'
+    return f"train {train_str} -> val {_SEASON_LABELS_MAP[val_id]}"
+
+
 FOLD_LABELS = {
-    1: 'train 2022-23 -> val 2023-24',
-    2: 'train 2022-24 -> val 2024-25',
-    3: 'train 2022-25 -> val 2025-26',
+    i + 1: _fold_label(tr, v)
+    for i, (tr, v) in enumerate(CV_FOLDS)
 }
 
 # ---------------------------------------------------------------------------
@@ -694,8 +712,9 @@ def plot_metrics_by_fold(
         ax.plot(grp['fold'], grp['mae'], marker='o',
                 label=model_name, color=color_map.get(model_name, 'black'), linewidth=1.8)
 
-    ax.set_xticks([1, 2, 3])
-    ax.set_xticklabels([FOLD_LABELS[i] for i in [1, 2, 3]], fontsize=7)
+    fold_nums = list(range(1, len(CV_FOLDS) + 1))
+    ax.set_xticks(fold_nums)
+    ax.set_xticklabels([FOLD_LABELS[i] for i in fold_nums], fontsize=7)
     ax.set_ylabel('MAE (points)')
     ax.set_title(f'{position} — MAE by CV fold')
     ax.legend()
