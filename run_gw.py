@@ -78,6 +78,73 @@ def _step_fetch(gw: int, season_id: int) -> None:
     log.info(f'[step1] Done — CSVs updated for {season_label} GW {gw}')
 
 
+def _step_schema_check(gw: int, season_id: int) -> None:
+    """
+    Compare actual merged_gw.csv column set against expected columns for
+    the current season (from etl/schema.py EXPECTED_COLS).
+
+    Alerts on:
+    - New columns (FPL added something unexpected)
+    - Dropped columns (FPL removed a previously present column)
+
+    Logs results to logs/monitoring/schema_alerts.csv.
+    Does NOT abort the pipeline -- schema changes are flagged, not fatal.
+    """
+    from etl.schema import EXPECTED_COLS
+
+    season_label = _SEASON_LABELS.get(season_id, '2025-26')
+    csv_path = _HERE / 'data' / season_label / 'gws' / 'merged_gw.csv'
+
+    if not csv_path.exists():
+        log.warning(f'[schema] merged_gw.csv not found at {csv_path} -- skipping schema check')
+        return
+
+    actual_cols = frozenset(pd.read_csv(csv_path, nrows=0).columns)
+    expected = EXPECTED_COLS.get(season_id, frozenset())
+
+    if not expected:
+        log.warning(f'[schema] No expected columns defined for season {season_id} -- skipping')
+        return
+
+    new_cols     = actual_cols - expected
+    dropped_cols = expected - actual_cols
+
+    alerts = []
+    if new_cols:
+        log.warning(f'[schema] GW {gw}: NEW columns detected: {sorted(new_cols)}')
+        alerts.append({
+            'season_id': season_id,
+            'gw': gw,
+            'check_type': 'new_columns',
+            'columns': ','.join(sorted(new_cols)),
+            'logged_at': datetime.now(timezone.utc).isoformat(),
+        })
+    if dropped_cols:
+        log.warning(f'[schema] GW {gw}: DROPPED columns detected: {sorted(dropped_cols)}')
+        alerts.append({
+            'season_id': season_id,
+            'gw': gw,
+            'check_type': 'dropped_columns',
+            'columns': ','.join(sorted(dropped_cols)),
+            'logged_at': datetime.now(timezone.utc).isoformat(),
+        })
+
+    if alerts:
+        _MONITOR_DIR.mkdir(parents=True, exist_ok=True)
+        schema_csv = _MONITOR_DIR / 'schema_alerts.csv'
+        schema_cols = ['season_id', 'gw', 'check_type', 'columns', 'logged_at']
+        if schema_csv.exists():
+            existing_alerts = pd.read_csv(schema_csv)
+        else:
+            existing_alerts = pd.DataFrame(columns=schema_cols)
+        new_alert_df = pd.DataFrame(alerts)
+        pd.concat([existing_alerts, new_alert_df], ignore_index=True).to_csv(
+            schema_csv, index=False
+        )
+    else:
+        log.info(f'[schema] GW {gw}: column set matches expected -- PASS')
+
+
 def _step_etl() -> None:
     """Rebuild fpl.db from scratch via etl/run.py."""
     log.info('[step2] Rebuilding fpl.db ...')
@@ -217,6 +284,145 @@ def _step_monitor(
             f"threshold={row['threshold']:.4f}{alert_flag}"
         )
 
+    _write_gw_eval_report(gw, season_id, predictions, new_rows, primary_model)
+
+
+def _write_gw_eval_report(
+    gw: int,
+    season_id: int,
+    predictions: pd.DataFrame,
+    new_rows: list,
+    primary_model: str = 'ridge',
+) -> None:
+    """
+    Write a per-GW narrative evaluation report to
+    logs/monitoring/gw{N}_s{season}_eval.md.
+
+    Sections:
+    - Summary table (MAE, RMSE, Spearman, top-10 prec, rolling MAE, alert)
+    - Top predictions vs actuals per position (top 5 predicted + top 5 actual)
+    - Largest misses (top 5 absolute error across all positions)
+    - Rolling trend (last 5 GWs from monitoring_log.csv)
+    - Alert status per position
+    """
+    season_label = _SEASON_LABELS.get(season_id, str(season_id))
+    date_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    pred_col = f'pred_{primary_model}'
+
+    lines: list[str] = [
+        f'# GW {gw} Evaluation -- Season {season_label} ({date_str})',
+        '',
+        '## Summary',
+        '',
+        '| Position | n | MAE | RMSE | Spearman | Top-10 Prec | Rolling 5-GW MAE | Alert |',
+        '|----------|---|-----|------|----------|-------------|------------------|-------|',
+    ]
+    for row in new_rows:
+        sub = predictions[predictions['position'] == row['position']]
+        if pred_col in predictions.columns and 'total_points' in predictions.columns:
+            n = int(sub.dropna(subset=[pred_col, 'total_points']).shape[0])
+        else:
+            n = int(sub.shape[0])
+        alert_str = 'ALERT' if row['alert'] else 'PASS'
+        lines.append(
+            f"| {row['position']} | {n} | {row['mae']:.4f} | {row['rmse']:.4f} | "
+            f"{row['spearman']:.4f} | {row['top10_precision']:.4f} | "
+            f"{row['rolling_mae_5gw']:.4f} | {alert_str} |"
+        )
+
+    lines += ['', '## Top Predictions vs Actuals', '']
+
+    for position in ('GK', 'DEF', 'MID', 'FWD'):
+        lines.append(f'### {position}')
+        lines.append('')
+        if pred_col not in predictions.columns or 'total_points' not in predictions.columns:
+            lines += ['No prediction data available.', '']
+            continue
+
+        sub = predictions[predictions['position'] == position].dropna(
+            subset=[pred_col, 'total_points']
+        ).copy()
+        if sub.empty:
+            lines += ['No data.', '']
+            continue
+
+        sub['abs_error'] = (sub[pred_col] - sub['total_points']).abs()
+
+        top_pred   = sub.nlargest(5, pred_col)
+        top_actual = sub.nlargest(5, 'total_points')
+
+        lines.append('**Top 5 by predicted score:**')
+        lines += [
+            f'| player_code | pred_{primary_model} | actual | abs_error |',
+            '|-------------|----------------------|--------|-----------|',
+        ]
+        for _, r in top_pred.iterrows():
+            lines.append(
+                f"| {int(r['player_code'])} | {r[pred_col]:.2f} | "
+                f"{r['total_points']:.0f} | {r['abs_error']:.2f} |"
+            )
+
+        lines += ['', '**Top 5 actual scorers:**']
+        lines += [
+            f'| player_code | pred_{primary_model} | actual | abs_error |',
+            '|-------------|----------------------|--------|-----------|',
+        ]
+        for _, r in top_actual.iterrows():
+            lines.append(
+                f"| {int(r['player_code'])} | {r[pred_col]:.2f} | "
+                f"{r['total_points']:.0f} | {r['abs_error']:.2f} |"
+            )
+        lines.append('')
+
+    lines += ['## Largest Misses', '']
+    if pred_col in predictions.columns and 'total_points' in predictions.columns:
+        all_valid = predictions.dropna(subset=[pred_col, 'total_points']).copy()
+        if not all_valid.empty:
+            all_valid['abs_error'] = (all_valid[pred_col] - all_valid['total_points']).abs()
+            top_misses = all_valid.nlargest(5, 'abs_error')
+            lines += [
+                f'| player_code | position | pred_{primary_model} | actual | abs_error |',
+                '|-------------|----------|-----------------------|--------|-----------|',
+            ]
+            for _, r in top_misses.iterrows():
+                lines.append(
+                    f"| {int(r['player_code'])} | {r['position']} | {r[pred_col]:.2f} | "
+                    f"{r['total_points']:.0f} | {r['abs_error']:.2f} |"
+                )
+    lines.append('')
+
+    lines += ['## Rolling Trend (last 5 GWs)', '']
+    if _MONITOR_CSV.exists():
+        hist = pd.read_csv(_MONITOR_CSV)
+        hist = hist[hist['model'] == 'ridge']
+        gws_in_log = sorted(hist['gw'].unique())[-5:]
+        lines += [
+            '| GW | GK MAE | DEF MAE | MID MAE | FWD MAE |',
+            '|----|--------|---------|---------|---------|',
+        ]
+        for g in gws_in_log:
+            row_cells = [str(int(g))]
+            for pos in ('GK', 'DEF', 'MID', 'FWD'):
+                val_rows = hist[(hist['gw'] == g) & (hist['position'] == pos)]
+                row_cells.append(
+                    f"{val_rows['mae'].values[0]:.4f}" if not val_rows.empty else 'N/A'
+                )
+            lines.append('| ' + ' | '.join(row_cells) + ' |')
+    lines.append('')
+
+    lines += ['## Alert Status', '']
+    for row in new_rows:
+        status = 'ALERT' if row['alert'] else 'PASS'
+        lines.append(
+            f"- **{row['position']}**: {status} "
+            f"(rolling MAE {row['rolling_mae_5gw']:.4f}, "
+            f"threshold {row['threshold']:.4f})"
+        )
+
+    out_path = _MONITOR_DIR / f'gw{gw}_s{season_id}_eval.md'
+    out_path.write_text('\n'.join(lines) + '\n')
+    log.info(f'[step4] Eval report written: {out_path}')
+
 
 # ---------------------------------------------------------------------------
 # Main entry point
@@ -247,6 +453,8 @@ def run(
         _step_fetch(gw, season_id)
     else:
         log.info('[step1] Skipped (--skip-fetch)')
+
+    _step_schema_check(gw, season_id)
 
     if not skip_etl:
         _step_etl()

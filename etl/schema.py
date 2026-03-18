@@ -33,6 +33,55 @@ POSITION_MAP = {1: 'GK', 2: 'DEF', 3: 'MID', 4: 'FWD', 5: 'MID'}
 # merged_gw.position string → position code
 POSITION_STR_TO_CODE = {'GK': 1, 'DEF': 2, 'MID': 3, 'FWD': 4}
 
+# ---------------------------------------------------------------------------
+# Expected columns in merged_gw.csv per season.
+# Used by schema change alerting in run_gw.py (_step_schema_check).
+# ---------------------------------------------------------------------------
+
+_CORE_COLS = frozenset({
+    'name', 'position', 'team', 'element', 'fixture', 'round', 'GW',
+    'kickoff_time', 'was_home', 'opponent_team', 'minutes', 'total_points',
+    'goals_scored', 'assists', 'clean_sheets', 'goals_conceded', 'own_goals',
+    'penalties_saved', 'penalties_missed', 'yellow_cards', 'red_cards', 'saves',
+    'bonus', 'bps', 'influence', 'creativity', 'threat', 'ict_index',
+    'transfers_in', 'transfers_out', 'transfers_balance', 'selected',
+    'value', 'team_h_score', 'team_a_score', 'modified',
+})
+_XP_COLS    = frozenset({'xP'})
+_XG_COLS    = frozenset({
+    'expected_goals', 'expected_assists',
+    'expected_goal_involvements', 'expected_goals_conceded',
+})
+_STARTS_COL = frozenset({'starts'})
+_MNG_COLS   = frozenset({
+    'mng_win', 'mng_draw', 'mng_loss', 'mng_underdog_win',
+    'mng_underdog_draw', 'mng_clean_sheets', 'mng_goals_scored',
+})
+_DEF_COLS   = frozenset({
+    'clearances_blocks_interceptions', 'defensive_contribution',
+    'recoveries', 'tackles',
+})
+
+EXPECTED_COLS: dict = {}
+for _s in SEASONS:
+    _sid     = _s[0]   # season_id
+    _hxp     = _s[6]   # has_xp
+    _hxg     = _s[7]   # has_xg_stats
+    _hstarts = _s[8]   # has_starts
+    _hmng    = _s[9]   # has_mng_cols
+    _cols = set(_CORE_COLS)
+    if _hxp:     _cols |= _XP_COLS
+    if _hxg:     _cols |= _XG_COLS
+    if _hstarts: _cols |= _STARTS_COL
+    if _hmng:    _cols |= _MNG_COLS
+    # Defensive era (season 10): add defensive cols.
+    # Also add starts -- present in actual data despite has_starts=0 flag in SEASONS.
+    # mng_* columns remain in the CSV as NULL columns despite the era dropping manager mode.
+    if _sid == 10:
+        _cols |= _DEF_COLS | _STARTS_COL | _MNG_COLS
+    EXPECTED_COLS[_sid] = frozenset(_cols)
+
+
 DDL = """
 PRAGMA foreign_keys = ON;
 

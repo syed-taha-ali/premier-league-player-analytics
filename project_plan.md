@@ -18,7 +18,7 @@
 | 6 | Evaluation |  Complete |
 | 7 | Interactive Dashboard & Visualisations |  Not started |
 | 8 | Deployment |  Complete |
-| 9 | Monitoring |  Not started |
+| 9 | Monitoring |  Complete |
 
 ---
 
