@@ -16,7 +16,7 @@
 | 4 | Feature Engineering |  Complete |
 | 5 | Modelling |  Complete |
 | 6 | Evaluation |  Complete |
-| 7 | Interactive Dashboard & Visualisations |  Not started |
+| 7 | Interactive Dashboard & Visualisations |  Complete |
 | 8 | Deployment |  Complete |
 | 9 | Monitoring |  Complete |
 
@@ -431,81 +431,114 @@ models (Ridge and LightGBM, all 4 positions) pass.
 
 ## Phase 7 — Interactive Dashboard & Visualisations
 
-### 7.1 Architecture
-- **Framework:** Streamlit (lower barrier; faster to iterate) or Plotly Dash (more
-  control for production). Decide at Phase 7 kickoff.
-- **Static charts:** matplotlib / seaborn exported to `outputs/eda/`
-- **Serving:** local (`streamlit run app.py`); no cloud deployment in initial phase
+**Status: Complete.**
+**Delivered:** branch `feature/phase9-monitoring` (co-delivered with Phase 9).
+**Report:** `docs/dashboard_report.md`
+**Full specification:** `docs/phase7_plan.md`
+**Launch command:** `streamlit run outputs/dashboards/app.py`
+
+### 7.1 Architecture (delivered)
+
+- **Framework:** Streamlit — multi-page routing via `pages/` directory, `@st.cache_data`
+  for all data loaders, wide layout, light theme.
+- **Serving:** local (`streamlit run outputs/dashboards/app.py`, port 8501).
 - **Output directory:** `outputs/dashboards/`
+- **Shared utils:** `outputs/dashboards/utils.py` — all pages import via `sys.path.insert`.
 
-### 7.2 Model selection for dashboard
+### 7.2 Files delivered
 
-All 21 serialised models are available via `ml/predict.py`. The following are
-recommended for the dashboard based on Phase 5/6 CV results:
+| File | Role |
+|------|------|
+| `outputs/dashboards/app.py` | Landing page: GW MAE metric cards + top-10 predictions tabs per position |
+| `outputs/dashboards/utils.py` | `query_db()`, `load_predictions()`, `load_fdr_calendar()`, `load_oof()`, monitoring/CV loaders; all `@st.cache_data` |
+| `outputs/dashboards/.streamlit/config.toml` | Wide layout, headless, no usage stats, light theme |
+| `outputs/dashboards/pages/1_Data_Explorer.py` | Historical EDA: distributions, home/away, team heatmap, career trajectories, xG scatter, era comparison, attack vs defence |
+| `outputs/dashboards/pages/2_Bias_Quality.py` | Bias reference: renders `docs/data_biases.md`, schema eras, missing data matrix, fixture difficulty, price vs performance, known quirks |
+| `outputs/dashboards/pages/3_Model_Performance.py` | CV table, OOF calibration scatter, static diagnostics, monitoring trend, residual decomposition, eval report viewer |
+| `outputs/dashboards/pages/4_GW_Predictions.py` | FDR calendar heatmap, captain cards, filterable prediction table, ownership bubble chart, CSV download |
+| `outputs/dashboards/pages/5_Player_Scouting.py` | Boom/bust quadrant, value picks scatter, form vs price, player comparison, price trajectory, component model OOF |
+| `outputs/dashboards/pages/6_Database_Explorer.py` | 20 SQL templates across 4 categories, table browser, free-form SQL editor, schema reference |
 
-| Role | Model | Rationale |
-|------|-------|-----------|
-| Default production | `ridge` | Best MAE and Spearman on all positions at default settings; sub-second inference; fully interpretable |
-| Uncertainty bands | `bayesian_ridge` | Produces `pred_std` per prediction; near-identical point estimates to Ridge; enables "predicted pts ± uncertainty" display |
-| Ensemble view | `blending` | Best ensemble model; beats Ridge on GK (2.123 vs 2.132) and DEF (2.121 vs 2.138); deps: ridge, bayesian_ridge, poisson_glm, mlp |
-| Component scouting | `component_model` | Best MAE on DEF (1.994) and FWD (2.155); sub-predictions (goals, assists, CS, bonus) surfaceable for player breakdown UI |
-| Rotation risk | `minutes_model` | Produces P(starts) intermediate; best GK MAE (2.098); P(starts) column is a direct rotation-risk signal |
+### 7.3 Page details
 
-Dashboard should default to Ridge but expose model selection. The model selector can offer at
-minimum: Ridge, Bayesian Ridge, Blending, and an optional "all models" comparison view.
+#### Landing Page
+- 4 metric cards: latest GW MAE per position vs alert threshold (green/red)
+- Tabs per position: top-10 predicted players from most recent GW prediction CSV
+- Navigation guide table
 
-### 7.3 Dashboard pages / sections
-
-#### Page 1 — Data Explorer (EDA insights)
-- Season selector, position filter, era toggle
-- Points distribution histogram (by position/season)
-- Home vs away comparison bar chart (by position)
-- Team strength heatmap: goals conceded per team per season
-- Player search: career trajectory chart (pts/GW over all seasons)
+#### Page 1 — Data Explorer
+- Sidebar: season multiselect (default xG era 7–10), position filter
+- Section A: GW points distribution histogram (faceted by season, coloured by position)
+- Section B: Home vs away mean pts grouped bar chart
+- Section C: Team strength heatmap (goals conceded from `team_h_score`/`team_a_score` — not player-level `goals_conceded`)
+- Section D: Player career trajectory — partial name search → GW pts line chart by season + summary table
+- Section E: xG vs actual goals scatter (xG era only), x=y reference line, min 5 appearances
+- Section F: Era comparison static PNG (`outputs/eda/era_comparison.png`)
+- Section G: Team attack vs defence scatter with quadrant labels and median reference lines
 
 #### Page 2 — Bias & Data Quality
-- Bias summary table (from `docs/data_biases.md`)
-- Missing data matrix: feature availability by season/era
-- Fixture difficulty effect: pts by opponent rank scatter
-- Price vs performance scatter (start_cost vs season_total_points)
+- Full `docs/data_biases.md` rendered inline
+- Missing data matrix PNG (`outputs/eda/missing_data_matrix.png`) with era restriction caption
+- Schema era summary table (6 eras, hardcoded markdown)
+- Top-6 fixture effect PNG (`outputs/eda/top6_fixture_effect.png`) + interactive opponent rank vs pts bar chart from feature matrix parquets
+- Price vs performance dual-image layout (`price_vs_season_points.png`, `price_band_performance.png`)
+- Known data quirks dataframe (7 rows) with warning banner
 
 #### Page 3 — Model Performance
-- **Data source:** `logs/training/cv_metrics_{pos}.csv` (21 models × 3 folds × 5 metrics, all positions)
-- Model comparison table: MAE / RMSE / Spearman ρ / Top-10 precision per model × position
-- **Calibration plots:** pre-rendered at `outputs/models/calibration_{pos}.png` — embed directly
-- **MAE-by-fold plots:** pre-rendered at `outputs/models/mae_by_fold_{pos}.png` — stability view
-- **SHAP feature importance:** pre-rendered at `outputs/models/shap_{pos}.png` (LightGBM, fold 3)
-- Residual plot: OOF residuals from `logs/training/cv_preds_{pos}.parquet` vs GW, coloured by position
+- CV comparison table: mean MAE/RMSE/Spearman across folds (ridge highlighted; best MAE per cell highlighted yellow)
+- OOF calibration scatter: pred vs actual with hover (player, GW), x=y reference, Pearson r + MAE summary
+- Static diagnostic plots: MAE-by-fold, SHAP, calibration, residuals, learning curves
+- Monitoring trend: rolling MAE line + threshold dashes + alert markers
+- Residual decomposition: home/away, opponent tier, price band, minutes bucket bar charts (via OOF-to-feature-matrix join)
+- Per-GW eval report viewer: selectbox from `logs/monitoring/gw*_s*_eval.md` files, inline markdown render
 
 #### Page 4 — GW Predictions
-- **Data source:** `ml/predict.py` → `predict_gw(gw, season_id, models=(...))` returns ranked DataFrame
-- Model selector (default: ridge; options: bayesian_ridge, blending, ridge, and others)
-- Ranked player predictions table: player, position, team, opponent, predicted pts
-- **Uncertainty column:** when bayesian_ridge selected, show "predicted pts ± pred_std"
-- **Rotation risk column:** when minutes_model selected or alongside ridge, show P(starts) %
-- **Component breakdown:** when component_model selected, show goals/assists/CS/bonus sub-predictions
-- Filter by position, price band, top-N per position
-- Download as CSV button; output path: `outputs/predictions/gw{N}_s{season}_predictions.csv`
+- FDR calendar heatmap (from feature matrix `opponent_season_rank`, 1–6 → FDR 5, 19–20 → FDR 1)
+- Captain candidate metric cards (top 3 by `pred_ridge`)
+- Prediction table: player, position, team, opponent (H/A), FDR badge, price, predicted pts, ownership %, differential flag, uncertainty (`pred_bayesian_ridge_std`), actual pts
+- Ownership bubble chart: 4-quadrant scatter (Differentials / Template / Avoid / Trap)
+- CSV download button
 
-#### Page 5 — Player Scouting (optional extension)
-- Component model sub-predictions: expected goals, assists, CS probability, bonus per player
-- Rotation risk table: P(starts) from minutes_model, sorted by risk level
-- Price vs predicted pts scatter per position (value pick identification)
+#### Page 5 — Player Scouting
+- Boom/bust quadrant: mean vs std of GW pts per player (std computed in pandas — SQLite lacks STDDEV)
+- Value picks scatter: pts_per_million (`pred_ridge / price_m`), top-3 annotated, top-5 tables per position
+- Form vs price scatter: `pts_rolling_5gw` vs price
+- Player comparison: up to 4 players, `pts_rolling_5gw` and `pts_rolling_3gw` computed in pandas from raw data
+- Price trajectory: dual-axis `go.Figure` — price line + pts bars per GW, start/end annotations
+- Component model OOF: `component_edge` scatter, rotation risk table (`p_starts = pred_minutes_model / 90`)
 
-### 7.4 Static report charts (always export)
-- `outputs/eda/points_distribution.png`
-- `outputs/eda/home_away_effect.png`
-- `outputs/eda/team_strength_heatmap.png`
-- `outputs/models/calibration_{position}.png`
-- `outputs/models/mae_by_fold_{position}.png`
-- `outputs/models/shap_{position}.png`
+#### Page 6 — Database Explorer
+- 20 SQL templates: Player (T1, T2, T4, T6, T13, T14, T15, T16), Team (T3, T11), Gameweek (T5, T10, T17), Advanced (T7, T8, T9, T12, T18, T19, T20)
+- Table browser with column filters
+- Free-form SQL editor with error handling
+- Collapsible schema reference
 
-### 7.5 Sequential model integration (deferred)
+### 7.4 pred_bayesian_ridge_std addition (ml/predict.py)
+
+A `_predict_bayesian_ridge_std()` helper added to `ml/predict.py`. Calls
+`model.predict(return_std=True)` on the BayesianRidge model after applying the same
+imputation and scaling steps as the main prediction path. The `pred_bayesian_ridge_std`
+column appears in prediction CSVs when `bayesian_ridge` is in the model set (default for
+`run_gw.py`).
+
+### 7.5 Integration check results
+
+All 21 pre-launch checks pass:
+- DB accessible (247,308 rows)
+- GW 30 predictions loaded (287 rows) with required columns
+- OOF parquets and feature matrices present for all 4 positions
+- Monitoring log populated; CV metrics populated (660 rows)
+- FDR calendar loads (600 rows); season list loads (10 seasons)
+- `data_biases.md` present; empty GW returns empty DataFrame (graceful)
+- All 3 required EDA static PNGs present
+
+HTTP 200 confirmed on local Streamlit launch (port 8501).
+
+### 7.6 Sequential model integration (deferred)
 
 LSTM and GRU are not serialised and cannot be called from `ml/predict.py`. If sequential
 predictions are desired in the dashboard, run `ml/evaluate_sequential.py` once per GW to
-generate a prediction CSV, then load it alongside the tabular predictions. A full
-`torch.save` serialisation path can be added to `evaluate_sequential.py` if justified.
+generate a prediction CSV, then load it alongside the tabular predictions.
 
 ---
 
